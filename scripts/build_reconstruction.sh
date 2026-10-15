@@ -17,6 +17,10 @@ swiftc -parse-as-library Sources/Folha/ReconstructedAdjustmentContract.swift \
   Sources/Folha/RecoveredPixelAdjustment.swift scripts/compare_recovered_pixels.swift \
   -o .build-ci/pixel-regression
 .build-ci/pixel-regression Tests/Fixtures/recovered-pixels.json | tee reports/recovered-pixels.log
+xcodebuild build-for-testing -project Folha.xcodeproj -scheme Folha -configuration Debug \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath .build-ci/simulator \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+  > reports/test-build.log 2>&1 || { tail -n 100 reports/test-build.log; exit 1; }
 xcrun simctl list devices available -j > reports/simulators.json
 SIMULATOR_ID="$(python3 - <<'PY'
 import json
@@ -33,20 +37,42 @@ printf 'Simulator: %s\n' "$SIMULATOR_ID"
 xcrun simctl boot "$SIMULATOR_ID" || true
 xcrun simctl bootstatus "$SIMULATOR_ID" -b
 set +e
-xcodebuild test -project Folha.xcodeproj -scheme Folha -configuration Debug \
+xcodebuild test-without-building -project Folha.xcodeproj -scheme Folha -configuration Debug \
   -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+  -destination-timeout 180 \
   -parallel-testing-enabled NO \
   -derivedDataPath .build-ci/simulator -resultBundlePath reports/ScannerTests.xcresult \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
   > reports/simulator-tests.log 2>&1
 TEST_STATUS=$?
 set -e
+if [[ "$TEST_STATUS" -eq 70 ]]; then
+  # One bounded retry for simulator discovery only, never hide failing tests.
+  sleep 20
+  xcrun simctl list devices available -j > reports/simulators-retry.json
+  set +e
+  xcodebuild test-without-building -project Folha.xcodeproj -scheme Folha -configuration Debug \
+    -destination "platform=iOS Simulator,id=$SIMULATOR_ID" -destination-timeout 180 \
+    -parallel-testing-enabled NO -derivedDataPath .build-ci/simulator \
+    -resultBundlePath reports/ScannerTests-retry.xcresult \
+    CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+    > reports/simulator-retry.log 2>&1
+  TEST_STATUS=$?
+  set -e
+  tail -n 100 reports/simulator-retry.log
+fi
 tail -n 100 reports/simulator-tests.log
 if [[ -d reports/ScannerTests.xcresult ]]; then
   xcrun xcresulttool get test-results summary --path reports/ScannerTests.xcresult \
     --format json > reports/test-summary.json || true
   xcrun xcresulttool export attachments --path reports/ScannerTests.xcresult \
     --output-path reports/screenshots || true
+fi
+if [[ -d reports/ScannerTests-retry.xcresult ]]; then
+  xcrun xcresulttool get test-results summary --path reports/ScannerTests-retry.xcresult \
+    --format json > reports/test-summary-retry.json || true
+  xcrun xcresulttool export attachments --path reports/ScannerTests-retry.xcresult \
+    --output-path reports/screenshots-retry || true
 fi
 [[ "$TEST_STATUS" -eq 0 ]] || exit "$TEST_STATUS"
 xcodebuild build -project Folha.xcodeproj -scheme Folha -configuration Release \
