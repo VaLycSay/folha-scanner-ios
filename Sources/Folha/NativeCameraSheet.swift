@@ -29,6 +29,20 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
     private let session = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
     private let metadataOutput = AVCaptureMetadataOutput()
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let documentDetector = LiveDocumentDetector()
+    private var documentTracker = LiveDocumentTracker()
+    private var visibleDocument: LiveDocumentQuad?
+    private var cameraReady = false
+    private var cameraInterrupted = false
+    private var liveAvailable = false
+    private var detectionEnabled = true
+    private var autoCaptureEnabled = false
+    private var cameraDevice: AVCaptureDevice?
+    private let documentOutline = CAShapeLayer()
+    private let documentCorners = CAShapeLayer()
+    private let detectionButton = UIButton(type: .system)
+    private let autoButton = UIButton(type: .system)
     private let captureQueue = DispatchQueue(label: "com.valyc.scanner.camera")
     private var preview: AVCaptureVideoPreviewLayer?
     private var images: [Data] = []
@@ -66,9 +80,12 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         previewContainer.layer.addSublayer(layer)
         preview = layer
         configureControls()
+        documentDetector.onResult = { [weak self] quad, error in self?.receiveDocument(quad, error: error) }
         NotificationCenter.default.addObserver(self, selector: #selector(interrupted), name: .AVCaptureSessionWasInterrupted, object: session)
         NotificationCenter.default.addObserver(self, selector: #selector(resumed), name: .AVCaptureSessionInterruptionEnded, object: session)
         NotificationCenter.default.addObserver(self, selector: #selector(runtimeFailure(_:)), name: .AVCaptureSessionRuntimeError, object: session)
+        NotificationCenter.default.addObserver(self, selector: #selector(applicationPaused), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(applicationActive), name: UIApplication.didBecomeActiveNotification, object: nil)
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized: configureSession()
         case .notDetermined:
@@ -105,11 +122,20 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         grid.accessibilityValue = "Ativada"
         grid.accessibilityIdentifier = "camera.grid"
         grid.addTarget(self, action: #selector(toggleGrid(_:)), for: .touchUpInside)
-        for button in [close, flash, grid] {
+        detectionButton.setImage(UIImage(systemName: "viewfinder"), for: .normal)
+        detectionButton.accessibilityLabel = "Detectar folha ao vivo"
+        detectionButton.accessibilityIdentifier = "camera.live-detection"
+        detectionButton.addTarget(self, action: #selector(toggleDetection), for: .touchUpInside)
+        autoButton.setTitle("Auto", for: .normal)
+        autoButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+        autoButton.accessibilityLabel = "Captura automatica"
+        autoButton.accessibilityIdentifier = "camera.auto-capture"
+        autoButton.addTarget(self, action: #selector(toggleAutoCapture), for: .touchUpInside)
+        for button in [close, flash, grid, detectionButton, autoButton] {
             button.setPreferredSymbolConfiguration(UIImage.SymbolConfiguration(pointSize: 20, weight: .regular), forImageIn: .normal)
             button.widthAnchor.constraint(equalToConstant: 44).isActive = true
         }
-        let header = UIStackView(arrangedSubviews: [close, UIView(), flash, grid])
+        let header = UIStackView(arrangedSubviews: [close, UIView(), autoButton, detectionButton, flash, grid])
         header.spacing = 10
         header.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(header)
@@ -121,6 +147,15 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         gridLines.fillColor = nil
         gridOverlay.layer.addSublayer(gridLines)
         previewContainer.addSubview(gridOverlay)
+        documentOutline.lineWidth = 2.5
+        documentOutline.lineJoin = .round
+        documentOutline.strokeColor = accent.cgColor
+        documentOutline.fillColor = accent.withAlphaComponent(0.08).cgColor
+        documentCorners.fillColor = UIColor.white.cgColor
+        documentCorners.strokeColor = accent.cgColor
+        documentCorners.lineWidth = 2
+        previewContainer.layer.addSublayer(documentOutline)
+        previewContainer.layer.addSublayer(documentCorners)
         let hint = UIView()
         hint.backgroundColor = UIColor.black.withAlphaComponent(0.68)
         hint.layer.cornerRadius = 17
@@ -132,6 +167,7 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         status.font = .preferredFont(forTextStyle: .caption1)
         status.adjustsFontForContentSizeCategory = true
         status.numberOfLines = 0
+        status.accessibilityIdentifier = "camera.detection-status"
         status.translatesAutoresizingMaskIntoConstraints = false
         hint.addSubview(status)
 
@@ -275,6 +311,10 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
             copyQR.topAnchor.constraint(equalTo: qrText.bottomAnchor, constant: 8),
             copyQR.centerXAnchor.constraint(equalTo: view.centerXAnchor)
         ])
+        updateDetectionControls()
+        let focus = UITapGestureRecognizer(target: self, action: #selector(focusDocument(_:)))
+        focus.cancelsTouchesInView = false
+        previewContainer.addGestureRecognizer(focus)
     }
 
     private func configureSession() {
@@ -293,6 +333,39 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
                 }
                 self.session.addInput(input)
                 self.session.addOutput(self.photoOutput)
+                self.cameraDevice = device
+                // Continuous focus/exposure are optional; their absence must not
+                // make otherwise-supported manual capture unavailable.
+                if (try? device.lockForConfiguration()) != nil {
+                    if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+                    if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+                    device.unlockForConfiguration()
+                }
+                var supportsLive = false
+                self.videoOutput.alwaysDiscardsLateVideoFrames = true
+                if self.session.canAddOutput(self.videoOutput) {
+                    self.session.addOutput(self.videoOutput)
+                    let formats = self.videoOutput.availableVideoPixelFormatTypes
+                    let preferred = [kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                                     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                     kCVPixelFormatType_32BGRA]
+                    if let format = preferred.first(where: { formats.contains($0) }) {
+                        self.videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: format]
+                    }
+                    if let videoConnection = self.videoOutput.connection(with: .video),
+                       videoConnection.isVideoRotationAngleSupported(0) {
+                        // Geometry assumes unrotated/unmirrored rear sensor
+                        // buffers. Vision applies .right without rotating every
+                        // video frame; AVCaptureVideoPreviewLayer maps to screen.
+                        videoConnection.videoRotationAngle = 0
+                        if videoConnection.isVideoMirroringSupported {
+                            videoConnection.automaticallyAdjustsVideoMirroring = false
+                            videoConnection.isVideoMirrored = false
+                        }
+                        self.videoOutput.setSampleBufferDelegate(self.documentDetector, queue: self.documentDetector.queue)
+                        supportsLive = true
+                    } else { self.session.removeOutput(self.videoOutput) }
+                }
                 if self.session.canAddOutput(self.metadataOutput) {
                     self.session.addOutput(self.metadataOutput)
                     self.metadataOutput.setMetadataObjectsDelegate(self, queue: .main)
@@ -301,10 +374,17 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
                 self.photoOutput.maxPhotoQualityPrioritization = .quality
                 self.session.commitConfiguration()
                 self.session.startRunning()
+                let hasLiveDetection = supportsLive
                 DispatchQueue.main.async {
                     guard !self.ended else { self.stop(); return }
+                    self.cameraReady = true
+                    self.liveAvailable = hasLiveDetection
+                    // Initial layout can precede creation of the AVCapture
+                    // connection. Apply portrait orientation after configuration.
+                    self.view.setNeedsLayout()
+                    self.view.layoutIfNeeded()
                     self.shutter.isEnabled = true
-                    self.status.text = "Enquadre o documento. O recorte sera ajustado no editor."
+                    self.refreshDetection()
                 }
             } catch { self.fail(error.localizedDescription) }
         }
@@ -315,6 +395,8 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         preview?.frame = previewContainer.bounds
+        documentOutline.frame = previewContainer.bounds
+        documentCorners.frame = previewContainer.bounds
         gridLines.frame = gridOverlay.bounds
         let lines = UIBezierPath()
         for division in 1...2 {
@@ -332,10 +414,17 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         modeMarker.frame = CGRect(x: modes.frame.minX + segmentWidth * (CGFloat(modes.selectedSegmentIndex) + 0.5) - 13,
                                   y: 0, width: 26, height: 3)
         if let connection = preview?.connection, connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
+        drawDocument(visibleDocument, stable: false)
     }
     @objc private func takePhoto() {
-        guard !ended, !capturing, mode != .qrCode, images.count < 50 else { return }
+        guard !ended, cameraReady, !cameraInterrupted, !capturing, mode != .qrCode,
+              presentedViewController == nil, images.count < 50 else { return }
         capturing = true
+        documentTracker.markCaptured(at: CACurrentMediaTime())
+        documentDetector.setEnabled(false)
+        shutter.readinessProgress = 0
+        status.text = "Capturando..."
+        updateDetectionControls()
         shutter.isSelected = true
         shutter.isEnabled = false
         finish.isEnabled = false
@@ -360,8 +449,8 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
             self.modes.isEnabled = true
             self.pageModes.isEnabled = true
             self.shutter.isEnabled = true
-            if let error = error { self.status.text = error.localizedDescription; self.finish.isEnabled = !self.images.isEmpty; return }
-            guard let data = data else { self.status.text = "Captura sem imagem. Tente novamente."; self.finish.isEnabled = !self.images.isEmpty; return }
+            if let error = error { self.captureFailed(error.localizedDescription); return }
+            guard let data = data else { self.captureFailed("Captura sem imagem. Tente novamente."); return }
             self.images.append(data)
             self.captureThumbnail.image = UIImage(data: data)
             self.captureThumbnail.isHidden = false
@@ -373,6 +462,7 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
             self.status.text = "\(self.images.count) paginas capturadas"
             if self.mode != .multiplePages || self.singleOnly { self.finishCapture() }
             else if self.images.count >= 50 { self.shutter.isEnabled = false; self.status.text = "50 paginas neste lote. Conclua e continue no documento." }
+            else { self.refreshDetection() }
         }
     }
     @objc private func changeMode() {
@@ -384,7 +474,8 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         shutter.isHidden = qr
         qrText.isHidden = !qr
         copyQR.isHidden = !qr
-        status.text = qr ? "Aponte para um QR. Links nao sao abertos automaticamente." : "Enquadre o documento e toque para capturar."
+        documentTracker.reset()
+        refreshDetection()
         view.setNeedsLayout()
     }
     @objc private func toggleFlash(_ sender: UIButton) {
@@ -414,28 +505,189 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         guard !ended else { return }
         if images.isEmpty { ended = true; stop(); onCancel?(); return }
         let alert = UIAlertController(title: "Descartar este lote?", message: "As \(images.count) paginas ainda nao foram salvas.", preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "Continuar", style: .cancel))
+        documentDetector.setEnabled(false)
+        shutter.readinessProgress = 0
+        alert.addAction(UIAlertAction(title: "Continuar", style: .cancel) { _ in
+            DispatchQueue.main.async { self.refreshDetection() }
+        })
         alert.addAction(UIAlertAction(title: "Descartar", style: .destructive) { _ in self.ended = true; self.stop(); self.onCancel?() })
         present(alert, animated: true)
     }
-    @objc private func interrupted() { DispatchQueue.main.async { self.shutter.isEnabled = false; self.status.text = "Camera interrompida. Aguarde retornar ao aplicativo." } }
-    @objc private func resumed() { DispatchQueue.main.async { if !self.ended { self.shutter.isEnabled = !self.capturing; self.status.text = "Camera pronta" } } }
+    @objc private func interrupted() { DispatchQueue.main.async {
+        self.cameraInterrupted = true
+        self.refreshDetection()
+        self.shutter.isEnabled = false
+        self.status.text = "Camera interrompida. Aguarde retornar ao aplicativo."
+    } }
+    @objc private func resumed() { DispatchQueue.main.async { if !self.ended {
+        self.cameraInterrupted = false
+        self.shutter.isEnabled = !self.capturing && self.images.count < 50
+        self.refreshDetection()
+    } } }
+    @objc private func applicationPaused() {
+        documentDetector.setEnabled(false)
+        drawDocument(nil, stable: false)
+        shutter.readinessProgress = 0
+    }
+    @objc private func applicationActive() { if cameraReady && !ended { refreshDetection() } }
     @objc private func runtimeFailure(_ notification: Notification) {
         let message = (notification.userInfo?[AVCaptureSessionErrorKey] as? Error)?.localizedDescription ?? "A camera foi interrompida."
         DispatchQueue.main.async {
+            self.cameraReady = false
+            self.refreshDetection()
             self.shutter.isEnabled = false
             self.status.text = message + (self.images.isEmpty ? " Feche e tente novamente." : " Conclua para salvar as paginas ja capturadas.")
         }
     }
     private func fail(_ message: String) { DispatchQueue.main.async { guard !self.ended else { return }; self.ended = true; self.stop(); self.onError?(message) } }
-    func stop() { captureQueue.async { [session] in if session.isRunning { session.stopRunning() } } }
+    func stop() {
+        documentDetector.setEnabled(false)
+        captureQueue.async { [session, videoOutput] in
+            videoOutput.setSampleBufferDelegate(nil, queue: nil)
+            if session.isRunning { session.stopRunning() }
+        }
+    }
+
+    private func updateDetectionControls() {
+        let usable = cameraReady && liveAvailable && !cameraInterrupted && !capturing && mode != .qrCode
+        detectionButton.isEnabled = usable
+        detectionButton.tintColor = detectionEnabled ? accent : .white
+        detectionButton.accessibilityValue = detectionEnabled ? "Ativada" : "Desativada"
+        autoButton.isEnabled = usable
+        autoButton.tintColor = autoCaptureEnabled ? accent : .white
+        autoButton.accessibilityValue = autoCaptureEnabled ? "Ativada" : "Desativada"
+        detectionButton.isHidden = mode == .qrCode
+        autoButton.isHidden = mode == .qrCode
+    }
+
+    private func refreshDetection() {
+        let enabled = cameraReady && liveAvailable && detectionEnabled && !cameraInterrupted &&
+            !capturing && !ended && mode != .qrCode && images.count < 50 &&
+            UIApplication.shared.applicationState == .active
+        documentDetector.setEnabled(enabled)
+        updateDetectionControls()
+        drawDocument(nil, stable: false)
+        shutter.readinessProgress = 0
+        if mode == .qrCode { status.text = "Aponte para um QR. Links nao sao abertos automaticamente." }
+        else if cameraInterrupted { status.text = "Camera interrompida. Aguarde." }
+        else if !cameraReady { status.text = "Preparando camera..." }
+        else if !liveAvailable { status.text = "Deteccao ao vivo indisponivel. Toque para fotografar e recortar no editor." }
+        else if !detectionEnabled { status.text = "Deteccao desativada. Toque para fotografar." }
+        else { status.text = "Enquadre a folha inteira. Procurando bordas..." }
+    }
+
+    @objc private func toggleDetection() {
+        detectionEnabled.toggle()
+        if !detectionEnabled { autoCaptureEnabled = false }
+        documentTracker.reset()
+        refreshDetection()
+    }
+
+    @objc private func toggleAutoCapture() {
+        autoCaptureEnabled.toggle()
+        if autoCaptureEnabled { detectionEnabled = true }
+        documentTracker.reset()
+        refreshDetection()
+    }
+
+    private func receiveDocument(_ quad: LiveDocumentQuad?, error: String?) {
+        guard cameraReady, !cameraInterrupted, !ended, !capturing, detectionEnabled,
+              mode != .qrCode, view.window != nil, presentedViewController == nil,
+              UIApplication.shared.applicationState == .active else { return }
+        if error != nil {
+            liveAvailable = false
+            autoCaptureEnabled = false
+            refreshDetection()
+            return
+        }
+        let state = documentTracker.update(quad, at: CACurrentMediaTime())
+        let fits = state.quad.map(documentFitsPreview) ?? false
+        drawDocument(state.quad, stable: state.stable && fits)
+        shutter.readinessProgress = autoCaptureEnabled && fits && !state.awaitingClear ? CGFloat(state.progress) : 0
+        if autoCaptureEnabled && state.awaitingClear {
+            status.text = "Pagina capturada. Retire a folha para capturar a proxima."
+        } else if state.quad == nil {
+            status.text = "Enquadre a folha inteira. Procurando bordas..."
+        } else if !fits {
+            status.text = "Afaste um pouco: deixe os quatro cantos visiveis."
+        } else if state.stable {
+            status.text = autoCaptureEnabled ? "Folha estavel. Capturando..." : "Folha identificada. Toque para capturar."
+        } else { status.text = "Folha identificada. Segure o iPhone firme." }
+        // A stale rectangle, modal, interrupted camera or a previously captured
+        // sheet can never trigger another capture. Manual shutter remains usable.
+        if autoCaptureEnabled && state.stable && fits && !state.awaitingClear && quad != nil {
+            takePhoto()
+        }
+    }
+
+    private func previewPoints(_ quad: LiveDocumentQuad) -> [CGPoint] {
+        guard let preview else { return [] }
+        return quad.points.map { preview.layerPointConverted(fromCaptureDevicePoint:
+            LiveDocumentQuad.captureDevicePoint(fromPortraitVision: $0)) }
+    }
+
+    private func documentFitsPreview(_ quad: LiveDocumentQuad) -> Bool {
+        let points = previewPoints(quad)
+        let inset = previewContainer.bounds.insetBy(dx: 10, dy: 10)
+        return points.count == 4 && points.allSatisfy { inset.contains($0) }
+    }
+
+    private func drawDocument(_ quad: LiveDocumentQuad?, stable: Bool) {
+        visibleDocument = quad
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard let quad, let first = previewPoints(quad).first else {
+            documentOutline.path = nil; documentCorners.path = nil; return
+        }
+        let points = previewPoints(quad)
+        let outline = UIBezierPath()
+        outline.move(to: first)
+        for point in points.dropFirst() { outline.addLine(to: point) }
+        outline.close()
+        let corners = UIBezierPath()
+        for point in points { corners.append(UIBezierPath(ovalIn: CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8))) }
+        documentOutline.path = outline.cgPath
+        documentOutline.fillColor = accent.withAlphaComponent(stable ? 0.15 : 0.06).cgColor
+        documentOutline.lineWidth = stable ? 3.5 : 2.5
+        documentCorners.path = corners.cgPath
+    }
+
+    private func captureFailed(_ message: String) {
+        // Do not repeatedly auto-retry a failed hardware capture.
+        autoCaptureEnabled = false
+        documentTracker.reset()
+        finish.isEnabled = !images.isEmpty
+        refreshDetection()
+        status.text = message + " Toque para tentar novamente."
+    }
+
+    @objc private func focusDocument(_ gesture: UITapGestureRecognizer) {
+        let point = gesture.location(in: previewContainer)
+        guard cameraReady, !capturing, mode != .qrCode, let preview,
+              !pageModes.frame.contains(point), !status.superview!.frame.contains(point) else { return }
+        let devicePoint = preview.captureDevicePointConverted(fromLayerPoint: point)
+        captureQueue.async { [weak self] in
+            guard let device = self?.cameraDevice else { return }
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = devicePoint }
+                if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+                if device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = devicePoint }
+                if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+            } catch { /* Optional focus does not interrupt the capture session. */ }
+        }
+    }
     deinit { NotificationCenter.default.removeObserver(self) }
 }
 
-// Capture feedback only: the teal ring does not imply automatic edge detection.
+// The extra ring reflects the live stability window only when Auto is enabled.
 private final class CameraShutterButton: UIButton {
     private let disc = CALayer()
     private let ring = CAShapeLayer()
+    private let stabilityRing = CAShapeLayer()
+    var readinessProgress: CGFloat = 0 { didSet { updateAppearance() } }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -444,6 +696,11 @@ private final class CameraShutterButton: UIButton {
         ring.lineWidth = 3
         layer.addSublayer(disc)
         layer.addSublayer(ring)
+        stabilityRing.fillColor = nil
+        stabilityRing.strokeColor = UIColor(red: 0.12, green: 0.78, blue: 0.65, alpha: 1).cgColor
+        stabilityRing.lineWidth = 3
+        stabilityRing.lineCap = .round
+        layer.addSublayer(stabilityRing)
         updateAppearance()
     }
 
@@ -461,6 +718,10 @@ private final class CameraShutterButton: UIButton {
         disc.cornerRadius = disc.bounds.width / 2
         ring.frame = bounds
         ring.path = UIBezierPath(ovalIn: bounds.insetBy(dx: 2, dy: 2)).cgPath
+        stabilityRing.frame = bounds
+        stabilityRing.path = UIBezierPath(arcCenter: CGPoint(x: bounds.midX, y: bounds.midY),
+            radius: min(bounds.width, bounds.height) / 2 - 2,
+            startAngle: -.pi / 2, endAngle: 3 * .pi / 2, clockwise: true).cgPath
         CATransaction.commit()
     }
 
@@ -472,6 +733,8 @@ private final class CameraShutterButton: UIButton {
             ? UIColor(red: 0.12, green: 0.78, blue: 0.65, alpha: 1)
             : UIColor(white: 0.26, alpha: 1)).cgColor
         alpha = isEnabled || isSelected ? 1 : 0.45
+        stabilityRing.strokeEnd = max(0, min(1, readinessProgress))
+        stabilityRing.isHidden = readinessProgress <= 0 || isSelected
         CATransaction.commit()
     }
 }

@@ -22,7 +22,7 @@ jobs:
       - name: Preserve unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Scanner-REA-0.4.0
+          name: Scanner-REA-0.5.0
           path: |
             artifacts/*.ipa
             artifacts/*.json

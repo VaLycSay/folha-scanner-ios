@@ -40,6 +40,12 @@ remains unproven; the 128-case kernel fixture is limited to historical contracts
 
 ## White-label fidelity pass
 
+Version 0.5.0 adds actual live video-frame rectangle detection, corner overlay,
+stability feedback, optional automatic capture with batch duplicate protection,
+and tap-to-focus. LIVE-CAPTURE.md documents the frame geometry, controls and
+physical-device acceptance boundary. This is an independently implemented
+Vision detector, not the original vendor's recovered image-processing engine.
+
 WHITE-LABEL-SPEC.md separates observed appearance, actual workflows and verified
 results. This pass adds compact quick tools, contextual Recent actions, Files
 selection in list/grid, grouped tools and adaptive editor presentation. Reopened
