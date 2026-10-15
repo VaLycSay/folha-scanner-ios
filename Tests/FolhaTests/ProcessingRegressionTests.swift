@@ -19,7 +19,7 @@ final class ProcessingRegressionTests: XCTestCase {
         return UIGraphicsImageRenderer(size: CGSize(width: 800, height: 1000), format: format).image { renderer in
             color.setFill()
             renderer.fill(CGRect(x: 0, y: 0, width: 800, height: 1000))
-            (text as NSString).draw(in: CGRect(x: 40, y: 80, width: 720, height: 100), attributes: [
+            (text as NSString).draw(in: CGRect(x: 40, y: 80, width: 720, height: 100), withAttributes: [
                 .font: UIFont.systemFont(ofSize: 60, weight: .bold), .foregroundColor: UIColor.black
             ])
         }
