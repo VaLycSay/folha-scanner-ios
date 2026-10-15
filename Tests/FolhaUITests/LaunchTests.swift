@@ -438,7 +438,9 @@ final class LaunchTests: XCTestCase {
         let toolbarButtons: Set<String> = [
             "editor.process", "editor.detect-borders", "editor.rotate-left", "editor.rotate-right",
             "editor.save", "editor.confirm-adjustments", "editor.cancel-adjustments",
-            "editor.adjustment.contrast", "editor.adjustment.brightness", "editor.adjustment.detail"
+            "editor.adjustment.contrast", "editor.adjustment.brightness", "editor.adjustment.detail",
+            "editor.adjustments", "editor.cancel", "editor.crop",
+            "document.rename", "document.previewPDF", "document.share"
         ]
         if toolbarButtons.contains(identifier) {
             return app.buttons.matching(identifier: identifier).firstMatch

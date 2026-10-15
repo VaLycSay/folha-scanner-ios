@@ -128,10 +128,8 @@ enum ScanEngine {
             ])
             current = current.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: 0.65])
         case .grayscale:
-            current = removingShadows(current)
             current = current.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0, kCIInputContrastKey: 1.18])
         case .document:
-            current = removingShadows(current)
             current = current.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0, kCIInputContrastKey: 1.65, kCIInputBrightnessKey: 0.04])
             current = current.applyingFilter("CIColorThreshold", parameters: ["inputThreshold": 0.58])
         case .lighten:

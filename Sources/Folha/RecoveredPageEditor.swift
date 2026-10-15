@@ -319,8 +319,8 @@ private final class EditorFilterThumbnails: ObservableObject {
         reset()
         let version = versions.current
         let filters = EditorFilterCatalog.recoveredOrder + [.removeShadow]
-        worker.perform(revision: version, work: {
-            let thumbnailSource = ScanEngine.normalized(source, maximum: 240)
+        worker.perform(revision: version, delay: 0.25, work: {
+            let thumbnailSource = ScanEngine.normalized(source, maximum: 160)
             var result: [Int: UIImage] = [:]
             for filter in filters {
                 var candidate = page
