@@ -9,7 +9,7 @@ clang -fobjc-arc -DREA_FLOW_TESTING -framework Foundation "$SRC/ux_policy.m" "$S
 "$ROOT/policy-tests" > "$ROOT/output/policy-tests.log" 2>&1
 SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
 clang -target arm64-apple-ios15.0 -isysroot "$SDK" -fobjc-arc -dynamiclib \
-  -framework Foundation -framework UIKit -framework QuartzCore \
+  -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics \
   -install_name '@rpath/ScannerREAFlow.dylib' \
   "$SRC/flow.m" "$SRC/continuous.m" "$SRC/ux_policy.m" "$SRC/ux_ios.m" -o "$ROOT/output/ScannerREAFlow.dylib"
 codesign --force --sign - "$ROOT/output/ScannerREAFlow.dylib"
@@ -19,7 +19,7 @@ ARCH="$(uname -m)"
 APP="$ROOT/ScannerREATests.app"
 mkdir -p "$APP"
 clang -target "$ARCH-apple-ios15.0-simulator" -isysroot "$SIMSDK" \
-  -fobjc-arc -DREA_FLOW_TESTING -framework Foundation -framework UIKit -framework QuartzCore \
+  -fobjc-arc -DREA_FLOW_TESTING -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics \
   "$SRC/continuous.m" "$SRC/ux_ios.m" "$SRC/ux_tests.m" -o "$APP/ScannerREATests"
 cat > "$APP/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
