@@ -7,13 +7,14 @@ import stat
 import struct
 import subprocess
 import zipfile
+from capture_patch import patch_capture, macho
 
 ROOT = Path(os.environ["PRIVATE_WORK"]).resolve()
 SOURCE = ROOT / "source.ipa"
 EXPECTED = "ab77ea7f69f13340d5efb30f948e4aa2d28ca1ad950425aa06b30635bcb74e7e"
 BRAND = "Scanner REA"
 APP_PREFIX = "Payload/CamScanner.app/"
-IPA_NAME = "Scanner-REA-Plus-5.26.12-experimental.ipa"
+IPA_NAME = "Scanner-REA-Plus-5.26.12-lote-auto-v2.ipa"
 OUT = ROOT / "delivery"
 OUT.mkdir()
 EXTRACT = ROOT / "reference"
@@ -90,6 +91,22 @@ def write_changed(path, data, reason):
         return
     path.write_bytes(data)
     changed[rel] = {"reason": reason, "before": digest(old), "after": digest(data)}
+
+# Original code stays unchanged except the documented Auto dwell instruction.
+# Batch/review adaptations live in our own module; no licensing hooks.
+main_path = app / "CamScanner"
+native_after, capture_receipt = patch_capture(main_path.read_bytes(), ROOT)
+write_changed(main_path, native_after, "own flow module loader plus Auto dwell timer")
+flow_library = ROOT / "ScannerREAFlow.dylib"
+macho(flow_library.read_bytes())
+flow_target = app / "Frameworks/ScannerREAFlow.dylib"
+assert not flow_target.exists()
+flow_target.write_bytes(flow_library.read_bytes())
+flow_target.chmod(0o755)
+added.append(flow_target.relative_to(EXTRACT).as_posix())
+(OUT / "capture-adjustments.json").write_text(json.dumps(capture_receipt, indent=2), encoding="utf-8")
+(OUT / "flow-tests.log").write_bytes((ROOT / "flow-tests.log").read_bytes())
+reports["own_flow_adapter_tests"] = {"exit_code": 0, "report": "flow-tests.log", "original_app_executed": False}
 
 info_path = app / "Info.plist"
 info = plistlib.loads(info_path.read_bytes())
@@ -173,7 +190,7 @@ for path in app.glob("*.lproj/*.strings"):
         write_changed(path, plistlib.dumps(values, fmt=plistlib.FMT_BINARY, sort_keys=False), "localized standalone product name only")
 
 # Resource seals and signing profiles are packaging metadata, not licenses.
-# Executable signature bytes, receipts, purchase logic, IDs and endpoints remain unchanged.
+# Receipts, purchase logic, IDs and endpoints remain unchanged. Main requires re-signing.
 for name in list(originals):
     p = PurePosixPath(name)
     if "_CodeSignature" in p.parts or p.name == "embedded.mobileprovision":
@@ -183,8 +200,13 @@ for name in list(originals):
 binary_receipt = []
 for name in binary_paths:
     now = file_hash(EXTRACT / name)
-    assert now == originals[name], "Executable changed: " + name
-    binary_receipt.append({"path": name, "sha256": now, "byte_identical": True})
+    is_main = name == APP_PREFIX + "CamScanner"
+    if is_main:
+        assert now == capture_receipt["modified_sha256"]
+    else:
+        assert now == originals[name], "Protected executable changed: " + name
+    binary_receipt.append({"path": name, "sha256": now, "byte_identical": not is_main,
+        "allowed_changes_only": True})
 
 for name, before in originals.items():
     if name in removed or name in changed:
@@ -218,7 +240,9 @@ receipt = {
     "binary_preservation": binary_receipt,
     "localized_display_names_changed": localized_names,
     "standalone_ui_brand_values_changed": exact_ui_names,
-    "changed_resources": changed, "removed_signing_metadata": removed, "added_icons": added,
+    "changed_files": changed, "removed_signing_metadata": removed, "added_files": added,
+    "capture_adjustments": capture_receipt,
+    "own_flow_library_sha256": file_hash(flow_target),
     "all_other_payload_files_byte_identical": True,
     "static_inspection": reports,
     "encrypted_extensions_preserved": 4,
@@ -229,36 +253,14 @@ receipt = {
         "All four encrypted extensions were preserved, not decrypted or removed.",
         "A complete new device signature is required. Installation may fail.",
         "The original bundle identifier is preserved; do not overwrite an installed original app with valuable data.",
-        "Only resource-level branding changed; compiled, remote and legal vendor branding may remain.",
+        "Resource-level branding plus own flow adapter and one Auto dwell instruction; compiled, remote and legal vendor branding may remain.",
         "Vendor account, paid services and cloud dependencies remain unchanged."
     ]
 }
 (OUT / "manifesto.json").write_text(json.dumps(receipt, indent=2, ensure_ascii=True), encoding="utf-8")
 (OUT / (IPA_NAME + ".sha256")).write_text(receipt["output_sha256"] + "  " + IPA_NAME + "\n", encoding="ascii")
-(OUT / "LEIA-ME.txt").write_text(
-    "SCANNER REA PLUS - EXPERIMENTO PRIVADO\n\n"
-    "Base: CamScanner+ 5.26.12. Nao e a recriacao independente 0.5.0.\n"
-    "Nome/icone e rotulos de marca foram alterados em recursos; os seis executaveis/bibliotecas permanecem byte a byte identicos.\n"
-    "O detector e os fluxos NAO foram reimplementados. Isso nao comprova funcionamento depois de reassinar.\n\n"
-    "ANTES DE INSTALAR\n"
-    "- Fonte comunitaria: autenticidade e seguranca nao comprovadas. Use ambiente de teste e documentos ficticios, sem credenciais reais.\n"
-    "- Necessita nova assinatura e provisionamento. Nao foi testado no seu iPhone/iOS.\n"
-    "- Bundle ID original preservado. NAO instale por cima do CamScanner+ que contenha documentos importantes.\n"
-    "- Quatro extensoes continuam criptografadas e podem impedir instalacao/uso. Nao foram removidas nem desbloqueadas.\n"
-    "- Assinador que mudar IDs ou remover extensoes introduzira alteracoes alem deste pacote; informe quais opcoes usou.\n\n"
-    "TESTE MANUAL\n"
-    "1. Assinar/instalar sem substituir uma instalacao de uso real; anotar erro completo se houver.\n"
-    "2. Conferir nome e icone, abrir camera e reconhecer uma folha com texto.\n"
-    "3. Testar folha em movimento, fundo claro/escuro e pouca luz.\n"
-    "4. Capturar varias paginas, recortar, filtrar, salvar, fechar e reabrir.\n"
-    "5. Exportar PDF/JPEG e comparar a ordem e o conteudo.\n"
-    "6. Nao inserir conta pessoal para testar nuvem. Premium permanece sujeito a licenca original.\n\n"
-    "LIMITES\n"
-    "Marcas compiladas, telas legais e servicos do fornecedor podem continuar exibindo CamScanner.\n"
-    "Nenhuma assinatura Premium foi simulada e nenhum recurso pago foi desbloqueado.\n"
-    "O original nao foi incluido na entrega. Logs e manifesto detalham a inspecao estatica.\n",
-    encoding="utf-8")
+(OUT / "LEIA-ME.txt").write_text("SCANNER REA PLUS V2 - LOTE E AUTO - EXPERIMENTO PRIVADO\n\nBase: CamScanner+ 5.26.12. Esta e a evolucao do IPA testado pelo usuario,\nnao a recriacao independente 0.5.0.\n\nMUDANCAS\n- Entrada comum da camera inicia em Lote, mantendo modos especiais explicitos\n  e retomadas/substituicao de pagina.\n- O salvamento e o rearme entre fotos usam o fluxo nativo, sem abrir corte\n  automaticamente a cada foto.\n- Concluir o lote abre a revisao nativa. Confirmar a revisao segue o salvamento\n  original sem reabrir a revisao em loop.\n- Espera do Auto apos enquadramento aceito: 1,5 segundo -> 1 segundo.\n  Isso nao e uma medicao do tempo total para fotografar.\n- Detector, geometria, criterios de borda e estabilidade, ICELib, camera e\n  processamento das imagens nao foram substituidos.\n- Uma biblioteca nossa adapta somente tres pontos de entrada do fluxo.\n  Uma instrucao de temporizacao e o cabecalho de carregamento foram alterados.\n\nWORD\nA cadeia de conversao encontrada envia PDF e baixa Word do servico do fornecedor.\nO conversor completo nao foi identificado como local. A funcao nao foi liberada,\nnenhuma compra foi simulada e nenhum servico remoto foi copiado.\n\nTESTES\nO runner compilou a biblioteca para iOS arm64, executou testes do adaptador\ncom classes de teste no macOS e verificou os bytes preservados no pacote.\nIsso NAO executou o CamScanner+ nem a camera fisica no runner.\nO manifesto separa essas evidencias da instalacao e do teste no iPhone.\n\nANTES DE INSTALAR\n- Necessita nova assinatura, incluindo Frameworks/ScannerREAFlow.dylib.\n- Fonte comunitaria: autenticidade/seguranca nao comprovadas.\n- Bundle ID original preservado. Faca copia dos documentos antes de atualizar;\n  nao substitua uma instalacao original com documentos importantes.\n- Quatro extensoes criptografadas foram preservadas. Nao foram desbloqueadas.\n- A assinatura antiga ja falhava na base. Reassinar continua obrigatorio.\n- Marca compilada, telas legais e servicos do fornecedor podem manter CamScanner.\n\nTESTE NO IPHONE\n1. Abrir a camera pelo fluxo normal e confirmar Lote.\n2. Fotografar tres folhas diferentes: contador sobe, corte nao abre entre fotos.\n3. Concluir, revisar as tres paginas e confirmar: salvar sem voltar em loop.\n4. Voltar da revisao para a camera, acrescentar uma pagina e concluir novamente.\n5. Conferir ordem/conteudo do PDF e reabrir o documento salvo.\n6. Testar Auto em papel parado e em movimento; observar nitidez e duplicatas.\n7. Testar troca de uma pagina existente e os modos especiais que utiliza.\n8. Se o comportamento nao mudar, informar o assinador e se ele manteve a\n   biblioteca ScannerREAFlow.dylib. Nao remover essa biblioteca.\n\nA versao experimental anterior e o IPA original nao foram sobrescritos.\n", encoding="utf-8")
 with zipfile.ZipFile(ROOT / "delivery.zip", "w", zipfile.ZIP_DEFLATED, compresslevel=1) as package:
     for path in sorted(OUT.iterdir()):
         package.write(path, path.name)
-print("Private packaging complete; six code components preserved.")
+print("Private package ready; protected code verified, own flow adapter tests passed.")

@@ -1,4 +1,4 @@
-name: Private reference branding experiment
+name: Private native capture flow experiment
 on:
   push:
     branches: ['private-rebrand-*']
@@ -34,6 +34,17 @@ jobs:
             npm install --prefix "$PRIVATE_WORK/rea" --ignore-scripts --no-audit --no-fund rea-agents@6.5.0
             export REA_CLI="$PRIVATE_WORK/rea/node_modules/rea-agents/scripts/rea.mjs"
             swift private-rebrand/icon.swift "$PRIVATE_WORK/brand"
+            SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+            clang -fobjc-arc -DREA_FLOW_TESTING -framework Foundation \
+              private-rebrand/flow.m private-rebrand/flow_host_tests.m \
+              -o "$PRIVATE_WORK/flow-tests"
+            "$PRIVATE_WORK/flow-tests" > "$PRIVATE_WORK/flow-tests.log" 2>&1
+            clang -target arm64-apple-ios15.0 -isysroot "$SDK" -fobjc-arc -dynamiclib \
+              -framework Foundation -install_name '@rpath/ScannerREAFlow.dylib' \
+              private-rebrand/flow.m -o "$PRIVATE_WORK/ScannerREAFlow.dylib"
+            printf '.text\nfmov d1, #1.5\nfmov d1, #1.0\n' > "$PRIVATE_WORK/timer-encoding.s"
+            clang -target arm64-apple-ios15.0 -isysroot "$SDK" -c \
+              "$PRIVATE_WORK/timer-encoding.s" -o "$PRIVATE_WORK/timer-encoding.o"
             python3 private-rebrand/rebrand.py
           } > "$PRIVATE_WORK/execution.log" 2>&1 && ok=true || ok=false
           if [ "$ok" = true ]; then
