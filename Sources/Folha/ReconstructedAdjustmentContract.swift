@@ -3,7 +3,7 @@ import Foundation
 /// Independent implementation of a bounded behavior recovered from the
 /// historical scanner's ARM64 argument-normalization prefix.
 /// This is not the original image transform and is not wired to the editor yet.
-struct ReconstructedAdjustmentContract: Codable, Equatable, Sendable {
+struct ReconstructedAdjustmentContract: Codable, Hashable, Sendable {
     let brightness: Int32
     let contrast: Int32
     let detail: Int32
