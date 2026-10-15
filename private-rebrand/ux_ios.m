@@ -7,7 +7,7 @@ extern BOOL REAEnsureContinuousCapture(id);
 
 static IMP mainAppear, pageAppear, pageEndEditing, previewAppear, previewUpdate;
 static IMP editorAppear, multiEditorAppear, cameraAppear, shutterAction, photoArrived, willCapture;
-static char pageMenuKey, viewerButtonKey, photoBadgeKey, captureStatsKey;
+static char pageMenuKey, viewerButtonKey, viewerTargetKey, photoBadgeKey, captureStatsKey;
 static NSString *const pagesIdentifier = @"scannerrea.pages";
 static NSString *const editIdentifier = @"scannerrea.edit";
 
@@ -43,6 +43,16 @@ BOOL REAInvokeNativeObjectAction(id target, SEL selector, id sender) {
     ((void (*)(id, SEL, id))objc_msgSend)(target, selector, sender);
     return YES;
 }
+static BOOL controlHasAction(UIControl *control, id target, SEL selector) {
+    UIControlEvents remaining = control.allControlEvents;
+    while (remaining) {
+        UIControlEvents event = remaining & (~remaining + 1);
+        remaining &= ~event;
+        NSArray *actions = [control actionsForTarget:target forControlEvent:event];
+        if ([actions containsObject:NSStringFromSelector(selector)]) return YES;
+    }
+    return NO;
+}
 static id findOriginalSender(UIViewController *vc, SEL selector) {
     for (UIBarButtonItem *item in rightItems(vc)) {
         if (item.target == vc && item.action == selector) return item;
@@ -52,13 +62,23 @@ static id findOriginalSender(UIViewController *vc, SEL selector) {
     for (NSUInteger i = 0; i < queue.count && i < 512; i++) {
         UIView *view = queue[i];
         if ([view isKindOfClass:[UIControl class]]) {
-            NSArray *actions = [(UIControl *)view actionsForTarget:vc forControlEvent:UIControlEventAllEvents];
-            if ([actions containsObject:NSStringFromSelector(selector)]) return view;
+            if (controlHasAction((UIControl *)view, vc, selector)) return view;
         }
         if (queue.count < 512) [queue addObjectsFromArray:view.subviews];
     }
     return nil;
 }
+@interface REAViewerEditTarget : NSObject
+@property(nonatomic, weak) UIViewController *controller;
+- (void)invoke:(id)sender;
+@end
+@implementation REAViewerEditTarget
+- (void)invoke:(id)sender {
+    UIViewController *vc = self.controller;
+    SEL action = sel_registerName("editingPage:");
+    if (vc) REAInvokeNativeObjectAction(vc, action, findOriginalSender(vc, action));
+}
+@end
 static BOOL senderEnabled(id sender) {
     if ([sender isKindOfClass:[UIControl class]])
         return [(UIControl *)sender isEnabled] && ![(UIControl *)sender isHidden];
@@ -124,18 +144,11 @@ void REAUpdateViewer(UIViewController *vc) {
     }
     NSMutableArray *items = [rightItems(vc) mutableCopy];
     if (items.count >= 3) return;
-    __weak UIViewController *weakVC = vc;
-    UIAction *action = [UIAction actionWithTitle:@"Editar" image:nil identifier:editIdentifier
-        handler:^(__kindof UIAction *unused) {
-            UIViewController *strongVC = weakVC;
-            REAInvokeNativeObjectAction(strongVC, selector, findOriginalSender(strongVC, selector));
-        }];
-    if (@available(iOS 16.0, *)) {
-        own = [[UIBarButtonItem alloc] initWithPrimaryAction:action menu:nil];
-    } else {
-        own = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemEdit
-                                                   primaryAction:action menu:nil];
-    }
+    REAViewerEditTarget *target = [REAViewerEditTarget new];
+    target.controller = vc;
+    own = [[UIBarButtonItem alloc] initWithTitle:@"Editar" style:UIBarButtonItemStylePlain
+                                        target:target action:@selector(invoke:)];
+    objc_setAssociatedObject(own, &viewerTargetKey, target, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     own.accessibilityIdentifier = editIdentifier;
     own.accessibilityLabel = @"Editar página atual";
     own.enabled = senderEnabled(sender);
@@ -169,8 +182,7 @@ void REAHideMarketingEntry(UIViewController *vc) {
     for (NSUInteger i = 0; i < queue.count && i < 512; i++) {
         UIView *view = queue[i];
         if ([view isKindOfClass:[UIControl class]]) {
-            NSArray *actions = [(UIControl *)view actionsForTarget:vc forControlEvent:UIControlEventAllEvents];
-            if ([actions containsObject:NSStringFromSelector(selector)]) {
+            if (controlHasAction((UIControl *)view, vc, selector)) {
                 view.hidden = YES; view.accessibilityElementsHidden = YES;
             }
         }

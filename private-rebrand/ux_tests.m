@@ -191,6 +191,18 @@ static void runTests(UIWindow *window) {
     check(viewer.editCalls == 1 && viewer.currentPageIndex == 7, @"page identity and handler retained");
     viewer.navigationItem.rightBarButtonItems = @[original]; [viewer viewWillAppear:NO];
     check(findItem(viewer, @"scannerrea.edit") != nil, @"shortcut survives native bar reconstruction");
+    UIBarButtonItem *restored = findItem(viewer, @"scannerrea.edit");
+    [UIApplication.sharedApplication sendAction:restored.action to:restored.target from:restored forEvent:nil];
+    check(viewer.editCalls == 2, @"visible shortcut dispatches native editing action");
+    [viewer.nativeEdit removeFromSuperview];
+    viewer.nativeEdit = [UIButton buttonWithType:UIButtonTypeSystem];
+    [viewer.nativeEdit addTarget:viewer action:@selector(editingPage:) forControlEvents:UIControlEventPrimaryActionTriggered];
+    [viewer.view addSubview:viewer.nativeEdit]; [viewer updateToolbarEnabled];
+    [UIApplication.sharedApplication sendAction:restored.action to:restored.target from:restored forEvent:nil];
+    check(viewer.editCalls == 3, @"shortcut resolves rebuilt native control and individual event");
+    viewer.nativeEdit.enabled = NO; [viewer updateToolbarEnabled];
+    [UIApplication.sharedApplication sendAction:restored.action to:restored.target from:restored forEvent:nil];
+    check(viewer.editCalls == 3 && !restored.enabled, @"shortcut never bypasses disabled native control");
 
     CSEditViewController *editor = [CSEditViewController new];
     UIBarButtonItem *save = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"checkmark"] style:0 target:editor action:@selector(done:)];
@@ -208,6 +220,10 @@ static void runTests(UIWindow *window) {
     main.navigationItem.rightBarButtonItems = @[original, buy]; show(window, main);
     check(![main.navigationItem.rightBarButtonItems containsObject:buy], @"identified marketing action removed");
     check([main.navigationItem.rightBarButtonItems containsObject:original], @"unrelated navigation retained");
+    UIButton *offerControl = [UIButton buttonWithType:UIButtonTypeSystem];
+    [offerControl addTarget:main action:@selector(loadPremiumAccountBuyViewController) forControlEvents:UIControlEventTouchUpInside];
+    [main.view addSubview:offerControl]; [main viewWillAppear:NO];
+    check(offerControl.hidden, @"identified marketing control hidden by individual event");
     for (Class cls in @[CSCameraPurchaseIDCardGuideView.class, CSCameraPurchaseOcrGuideView.class,
                        CSCameraPurchaseExcelGuideView.class, CSCameraPurchaseCertifcationGuideView.class]) {
         UIView *guide = [[cls alloc] initWithFrame:CGRectMake(0, 0, 60, 30)];
@@ -270,7 +286,7 @@ static void finishTests(void) {
     exit(failures.count ? 1 : 0);
 }
 @interface TestSceneDelegate : UIResponder <UIWindowSceneDelegate>
-@property(strong) UIWindow *window;
+@property(nonatomic, strong) UIWindow *window;
 @end
 @implementation TestSceneDelegate
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
