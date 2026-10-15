@@ -4,9 +4,13 @@ import UIKit
 // Serial, versioned work keeps decoding, rendering, pixel loops and Vision off MainActor.
 // Synchronous Core Image/Vision cannot be interrupted; obsolete results are never published.
 private final class EditorImageWorker: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "com.valyc.editor.preview", qos: .userInitiated)
+    private let queue: DispatchQueue
     private let lock = NSLock()
     private var revision: UInt64 = 0
+
+    init(qos: DispatchQoS = .userInitiated) {
+        self.queue = DispatchQueue(label: "com.valyc.editor.preview", qos: qos)
+    }
 
     func invalidate(_ value: UInt64) {
         lock.lock(); revision = value; lock.unlock()
@@ -51,7 +55,7 @@ private final class EditorViewModel: ObservableObject {
     @Published private(set) var recognizedText = ""
     private var folder: URL?
     private var cropSnapshot: ScanPage?
-    private var adjustmentSnapshot: ScanPage?
+    private(set) var adjustmentSnapshot: ScanPage?
     private var adjustmentTextSnapshot = ""
     private var versions = EditorPreviewRevision()
     private let worker = EditorImageWorker()
@@ -147,8 +151,6 @@ private final class EditorViewModel: ObservableObject {
         adjustments.begin()
         stage = .adjustments
         draft?.reconstructedAdjustments = adjustments.effective
-        invalidateText()
-        refreshPreview()
     }
     func selectAdjustment(_ control: EditorAdjustmentState.Control) { adjustments.selected = control }
     func adjust(to value: Double) {
@@ -160,19 +162,29 @@ private final class EditorViewModel: ObservableObject {
     }
     func finishAdjustments(confirm: Bool) {
         guard stage == .adjustments, !saving else { return }
+        let changed = draft != adjustmentSnapshot
         if confirm {
             adjustments.confirm()
             draft?.reconstructedAdjustments = adjustments.effective
-            invalidateText()
+            if draft != adjustmentSnapshot {
+                invalidateText()
+                refreshPreview(debounced: false)
+            } else {
+                previewReady = true
+            }
         } else {
             adjustments.cancel()
             if let snapshot = adjustmentSnapshot { draft = snapshot }
             recognizedText = adjustmentTextSnapshot
+            if changed {
+                refreshPreview(debounced: false)
+            } else {
+                previewReady = true
+            }
         }
         adjustmentSnapshot = nil
         adjustmentTextSnapshot = ""
         stage = .processed
-        refreshPreview(debounced: false)
     }
     func requestGeometry(_ change: GeometryChange) {
         guard !controlsBlocked else { return }
@@ -299,10 +311,11 @@ private final class EditorViewModel: ObservableObject {
 private final class EditorFilterThumbnails: ObservableObject {
     @Published private(set) var page: ScanPage?
     @Published private(set) var images: [Int: UIImage] = [:]
-    private let worker = EditorImageWorker()
+    private let worker = EditorImageWorker(qos: .utility)
     private var versions = EditorPreviewRevision()
 
     func render(source: UIImage, page: ScanPage) {
+        if self.page == page && !images.isEmpty { return }
         reset()
         let version = versions.current
         let filters = EditorFilterCatalog.recoveredOrder + [.removeShadow]
@@ -347,7 +360,8 @@ struct RecoveredPageEditor: View {
     @State private var deleteRequested = false
 
     private var thumbnailRecipe: ScanPage? {
-        guard model.stage == .processed, model.source != nil, var page = model.draft else { return nil }
+        guard model.stage != .crop, model.source != nil,
+              var page = (model.stage == .adjustments ? model.adjustmentSnapshot : nil) ?? model.draft else { return nil }
         // Selecting a filter or completing OCR does not regenerate the whole strip.
         page.filter = .natural
         page.lines = []
@@ -500,7 +514,8 @@ struct RecoveredPageEditor: View {
                 .frame(maxWidth: 224)
                 .accessibilityIdentifier("editor.content-mode")
             }
-            if model.stage != .processed || model.saving || model.work != nil {
+            let activeWork = model.work == .loading || model.work == .borders || model.work == .ocr
+            if model.stage != .processed || model.saving || activeWork {
                 HStack(spacing: 8) {
                     Text(model.stage == .crop ? "Recorte" : model.stage == .adjustments ? "Ajustes" : "Previa")
                         .font(.caption.weight(.medium))
@@ -508,7 +523,7 @@ struct RecoveredPageEditor: View {
                     if model.saving {
                         ProgressView().tint(ScannerAppearance.accent)
                         Text("Salvando...").font(.caption)
-                    } else if model.work != nil {
+                    } else if activeWork {
                         ProgressView().tint(ScannerAppearance.accent)
                         Text("Processando...").font(.caption)
                     } else {
@@ -696,7 +711,7 @@ struct RecoveredPageEditor: View {
         }
         .padding(.horizontal, 20).padding(.vertical, 10)
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("editor.adjustments")
+        .accessibilityIdentifier("editor.adjustments.panel")
     }
     private func handle(_ operation: Contract.Operation) {
         guard !model.controlsBlocked && !store.isBusy else { return }

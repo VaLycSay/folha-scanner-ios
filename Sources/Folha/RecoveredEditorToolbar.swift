@@ -113,6 +113,7 @@ public final class RecoveredEditorToolbar: UIView {
         done.isHidden = !hasDone
         strip.isScrollEnabled = hasDone
         setNeedsLayout()
+        layoutIfNeeded()
     }
 
     private func apply(_ operation: Operation, to button: UIButton) {

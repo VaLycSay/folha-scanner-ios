@@ -302,6 +302,11 @@ enum DocumentTransfer {
 
     private static func importPDF(_ data: Data) throws -> [ScanInput] {
         guard let provider = CGDataProvider(data: data as CFData), let pdf = CGPDFDocument(provider) else {
+            let header = String(decoding: data.prefix(65_536), as: UTF8.self)
+            if header.contains("%PDF-"), header.contains("%%EOF"),
+               header.contains("/Type /Pages"), header.contains("/Count 0") {
+                throw Failure.emptyPDF
+            }
             throw Failure.invalidPDF
         }
         guard !pdf.isEncrypted || pdf.isUnlocked || pdf.unlockWithPassword("") else { throw Failure.passwordRequired }

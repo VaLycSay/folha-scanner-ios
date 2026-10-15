@@ -90,7 +90,9 @@ struct ScannerHomeScreen: View {
                         }.padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 24)
                     }.scrollDismissesKeyboard(.interactively)
                 }
-            }.background(ScannerAppearance.surface).accessibilityIdentifier("library.screen")
+            }.background(ScannerAppearance.surface)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("library.screen")
                 .navigationTitle("Documentos").navigationBarTitleDisplayMode(.inline)
                 .toolbar(.hidden, for: .navigationBar)
                 .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
@@ -587,6 +589,7 @@ struct ScannerExportSheet: View {
                 .alert("Nao foi possivel exportar", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
                     Button("OK", role: .cancel) { failure = nil }
                 } message: { Text(failure ?? "") }
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("export.screen")
         }
     }

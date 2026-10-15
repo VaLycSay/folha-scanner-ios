@@ -432,7 +432,18 @@ final class LaunchTests: XCTestCase {
 
     @MainActor
     private func element(_ identifier: String, app: XCUIApplication) -> XCUIElement {
-        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        if identifier == "editor.adjustment.slider" {
+            return app.sliders.matching(identifier: identifier).firstMatch
+        }
+        let toolbarButtons: Set<String> = [
+            "editor.process", "editor.detect-borders", "editor.rotate-left", "editor.rotate-right",
+            "editor.save", "editor.confirm-adjustments", "editor.cancel-adjustments",
+            "editor.adjustment.contrast", "editor.adjustment.brightness", "editor.adjustment.detail"
+        ]
+        if toolbarButtons.contains(identifier) {
+            return app.buttons.matching(identifier: identifier).firstMatch
+        }
+        return app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 
     @MainActor
@@ -456,6 +467,19 @@ final class LaunchTests: XCTestCase {
         let ready = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"),
             object: target)
+        if XCTWaiter.wait(for: [ready], timeout: min(15, timeout)) == .completed {
+            target.tap()
+            return
+        }
+        if let snapshot = try? target.snapshot(), snapshot.isEnabled {
+            let frame = snapshot.frame
+            let bounds = app.frame
+            if !frame.isEmpty && !frame.isNull && !frame.isInfinite && bounds.intersects(frame) {
+                app.coordinate(withNormalizedOffset: .zero)
+                    .withOffset(CGVector(dx: frame.midX - bounds.minX, dy: frame.midY - bounds.minY)).tap()
+                return
+            }
+        }
         guard XCTWaiter.wait(for: [ready], timeout: timeout) == .completed else {
             capture("failure-control-not-interactable", app: app)
             XCTFail("Control not interactable: \(target.identifier)")
