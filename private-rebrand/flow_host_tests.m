@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 extern int REAInstallFlowHooks(void);
 static unsigned checks;
 static void check(BOOL value, NSString *name) {
@@ -30,10 +31,9 @@ static void check(BOOL value, NSString *name) {
 @property NSInteger currentImagePickerMode;
 @property(getter=isRetakeMode) BOOL retakeMode;
 @property BOOL needPreviewInMultiTake;
-@property NSArray *selectedImagePaths;
+@property(strong) NSArray *selectedImagePaths;
 @property NSUInteger previews;
 @property NSUInteger saves;
-@property NSUInteger captures;
 @property NSUInteger originalDoneCalls;
 @property NSUInteger originalFinishCalls;
 - (void)doneButtonDidClicked:(id)sender;
@@ -51,44 +51,47 @@ static void check(BOOL value, NSString *name) {
 @end
 int main(void) {
     @autoreleasepool {
-        check(REAInstallFlowHooks() == 1, @"install all verified hooks");
+        Method finish = class_getInstanceMethod([ISCustomCameraImagePickerController class], @selector(previewController:finishMultiTakePhoto:));
+        IMP originalFinish = method_getImplementation(finish);
+        check(REAInstallFlowHooks() == 1, @"install the two flow hooks");
         check(REAInstallFlowHooks() == 1, @"idempotent installation");
+        check(method_getImplementation(finish) == originalFinish, @"optional native review callback not hooked");
         CSImagePickerCameraFactory *maker = [CSImagePickerCameraFactory new];
         for (NSInteger mode = -1; mode <= 13; mode++) {
             TestConfiguration *config = [maker createConfigurationWithMode:mode fromController:nil extra:@{}];
-            check(config.currentModel == (mode <= 1 ? 2 : mode), @"normal entry defaults and explicit modes");
+            check(config.currentModel == (mode <= 1 ? 2 : mode), @"normal entry and explicit modes");
             config = [maker createConfigurationWithMode:mode fromController:nil extra:@{@"retake":@YES}];
-            check(config.currentModel == mode, @"retakes preserve their mode");
+            check(config.currentModel == mode, @"retake keeps original mode");
         }
         check(maker.originalCalls == 30, @"original factory called once per entry");
         TestConfiguration *singleOnly = [maker createConfigurationWithMode:1 fromController:nil extra:@{@"mask":@1}];
-        check(singleOnly.currentModel == 1, @"single-only mask preserved");
-        check([maker createConfigurationWithMode:1 fromController:nil extra:@{@"nil":@YES}] == nil, @"nil configuration preserved");
+        check(singleOnly.currentModel == 1, @"single-only camera preserved");
+        check([maker createConfigurationWithMode:1 fromController:nil extra:@{@"nil":@YES}] == nil, @"nil config preserved");
         ISCustomCameraImagePickerController *camera = [ISCustomCameraImagePickerController new];
         camera.currentImagePickerMode = 2;
-        camera.selectedImagePaths = @[@"page1", @"page2", @"page3"];
-        check(camera.previews == 0 && camera.originalDoneCalls == 0, @"no review before explicit completion");
+        camera.selectedImagePaths = @[@"one", @"two", @"three"];
+        camera.needPreviewInMultiTake = YES;
         [camera doneButtonDidClicked:nil];
-        check(camera.previews == 1 && camera.saves == 0, @"done enters review instead of saving");
+        check(camera.saves == 1 && camera.previews == 0, @"batch goes directly to native save path");
+        check(camera.originalDoneCalls == 1, @"single completion dispatch");
+        [camera doneButtonDidClicked:nil];
+        check(camera.saves == 2 && camera.previews == 0, @"subsequent batch does not force review");
         [camera previewController:nil finishMultiTakePhoto:camera.selectedImagePaths];
-        check(camera.originalFinishCalls == 1 && camera.saves == 1 && camera.previews == 1, @"finish saves once without reopening review");
+        check(camera.originalFinishCalls == 1 && camera.saves == 3, @"manually entered review can still finish");
+        camera.currentImagePickerMode = 1; camera.needPreviewInMultiTake = YES;
         [camera doneButtonDidClicked:nil];
-        check(camera.previews == 2, @"next batch may review again");
-        camera.needPreviewInMultiTake = NO;
-        camera.currentImagePickerMode = 1;
-        [camera doneButtonDidClicked:nil];
-        check(!camera.needPreviewInMultiTake, @"single mode unchanged");
+        check(camera.needPreviewInMultiTake, @"single-image flow unchanged");
         camera.currentImagePickerMode = 2; camera.retakeMode = YES;
         [camera doneButtonDidClicked:nil];
-        check(!camera.needPreviewInMultiTake, @"retake review unchanged");
+        check(camera.needPreviewInMultiTake, @"retake flow unchanged");
         camera.retakeMode = NO; camera.selectedImagePaths = @[];
         [camera doneButtonDidClicked:nil];
-        check(!camera.needPreviewInMultiTake, @"empty batch validation left to original");
-        camera.selectedImagePaths = @[@"page4"];
+        check(camera.needPreviewInMultiTake, @"empty batch left to original validation");
+        camera.selectedImagePaths = @[@"one"];
         [camera doneButtonDidClicked:nil];
-        check(camera.needPreviewInMultiTake, @"one-page batch still reviews");
-        check(camera.originalDoneCalls == 7, @"exactly one original call per action");
-        printf("PASS %u own-adapter assertions; original application and camera not executed.\n", checks);
+        check(!camera.needPreviewInMultiTake, @"one-page batch also uses direct save path");
+        check(camera.originalDoneCalls == 7, @"one original call for each requested completion");
+        printf("PASS %u own-adapter assertions; original iPhone application not executed.\n", checks);
     }
     return 0;
 }

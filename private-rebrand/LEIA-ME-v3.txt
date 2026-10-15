@@ -1,0 +1,49 @@
+SCANNER REA PLUS V3 - SALVAR DIRETO, EDICAO OPCIONAL
+
+Base preservada: CamScanner+ 5.26.12.
+Esta versao continua o IPA v2 aprovado pelo usuario.
+
+MUDANCA DESTA RODADA
+Concluir um lote nao abre mais a revisao obrigatoria que adicionamos na v2.
+O adaptador segue o caminho nativo de finalizacao e salvamento.
+As acoes nativas de editar ou visualizar paginas continuam disponiveis;
+o callback de revisao nao e mais interceptado.
+
+PERMANECE
+- Entrada normal da camera em Lote.
+- Captura, deteccao, recorte e processamento nativos.
+- Espera do Auto apos enquadramento aceito em 1 segundo.
+- Modos especiais explicitos e retakes preservados pelos guards.
+- Nenhuma nova mudanca no motor de deteccao nesta rodada.
+
+LIMITES
+A biblioteca foi compilada para iOS arm64. Os testes de fluxo usam classes de
+teste no macOS, nao executam o CamScanner+ nem a camera de um iPhone.
+Ainda e necessario conferir no aparelho se Concluir abre o documento salvo
+sem outra confirmacao do proprio fluxo nativo. Nao declaramos paridade total
+com o CamScanner atual 7.27 apenas porque a compilacao e os testes passaram.
+
+WORD
+O caminho rastreado depende do servidor do fornecedor. Nao foi desbloqueado.
+Nao houve alteracao de recibos, licencas ou verificacoes Premium.
+
+INSTALACAO
+- Reassine o IPA incluindo Frameworks/ScannerREAFlow.dylib.
+- O bundle ID original continua igual. Preserve seus documentos antes de
+  atualizar; nao instale sobre uma copia original com documentos importantes.
+- Fonte comunitaria, autenticidade/seguranca nao comprovadas. A assinatura antiga
+  ja falhava na base. Quatro extensoes criptografadas continuam preservadas.
+- A v2 permanece em Downloads como alternativa para voltar.
+
+TESTE NO IPHONE
+1. Capturar tres folhas em Lote e tocar Concluir.
+2. Conferir se vai ao documento salvo sem a revisao obrigatoria.
+3. Abrir uma pagina e editar manualmente; salvar a alteracao.
+4. Acrescentar, remover e reordenar paginas; conferir a ordem no PDF exportado.
+5. Testar Auto e substituicao de uma pagina existente.
+6. Se ainda aparecer confirmacao extra, informar o texto e o botao exibidos.
+
+METODO DE EVOLUCAO
+Reconhecimento e comparacao organizados em replica/ no projeto local,
+inspirados em Jakeschincariol/replica-skill, junto com o REA.
+As capturas de referencia ficam fora do IPA e de publicacao.

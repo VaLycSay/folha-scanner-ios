@@ -45,7 +45,7 @@ jobs:
             printf '.text\nfmov d1, #1.5\nfmov d1, #1.0\n' > "$PRIVATE_WORK/timer-encoding.s"
             clang -target arm64-apple-ios15.0 -isysroot "$SDK" -c \
               "$PRIVATE_WORK/timer-encoding.s" -o "$PRIVATE_WORK/timer-encoding.o"
-            python3 private-rebrand/rebrand.py
+            python3 private-rebrand/package_optional_review.py
           } > "$PRIVATE_WORK/execution.log" 2>&1 && ok=true || ok=false
           if [ "$ok" = true ]; then
             node private-rebrand/seal.mjs seal "$PRIVATE_WORK/delivery.zip" private-rebrand/recipient-public.pem sealed/delivery

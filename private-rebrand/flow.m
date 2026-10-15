@@ -4,12 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Own flow adaptation. No detector, OCR, networking or purchase-state hooks.
 static id (*originalFactory)(id, SEL, NSInteger, id, id);
 static void (*originalDone)(id, SEL, id);
-static void (*originalFinish)(id, SEL, id, id);
-static char finishingReviewKey;
-
 static BOOL has(id object, const char *name) {
     return object && [object respondsToSelector:sel_registerName(name)];
 }
@@ -19,22 +15,12 @@ static NSInteger integer(id object, const char *name) {
 static BOOL boolean(id object, const char *name) {
     return ((BOOL (*)(id, SEL))objc_msgSend)(object, sel_registerName(name));
 }
-static void setBool(id object, const char *name, BOOL value) {
-    ((void (*)(id, SEL, BOOL))objc_msgSend)(object, sel_registerName(name), value);
-}
-static BOOL batchCamera(id camera) {
-    return has(camera, "currentImagePickerMode") && has(camera, "isRetakeMode") &&
-        has(camera, "setNeedPreviewInMultiTake:") &&
-        integer(camera, "currentImagePickerMode") == 2 &&
-        !boolean(camera, "isRetakeMode");
-}
 static id factory(id self, SEL selector, NSInteger mode, id controller, id extra) {
     id config = originalFactory(self, selector, mode, controller, extra);
     if (has(config, "currentModel") && has(config, "retakeMode") &&
         has(config, "modeMask") && has(config, "setCurrentModel:")) {
-        NSInteger selected = integer(config, "currentModel");
-        if (selected <= 1 && !boolean(config, "retakeMode") &&
-            (integer(config, "modeMask") & 2) != 0) {
+        if (integer(config, "currentModel") <= 1 &&
+            !boolean(config, "retakeMode") && (integer(config, "modeMask") & 2) != 0) {
             ((void (*)(id, SEL, NSInteger))objc_msgSend)(
                 config, sel_registerName("setCurrentModel:"), 2);
         }
@@ -42,26 +28,19 @@ static id factory(id self, SEL selector, NSInteger mode, id controller, id extra
     return config;
 }
 static void done(id self, SEL selector, id sender) {
-    if (batchCamera(self) && !objc_getAssociatedObject(self, &finishingReviewKey) &&
-        has(self, "selectedImagePaths")) {
+    if (has(self, "currentImagePickerMode") && has(self, "isRetakeMode") &&
+        has(self, "selectedImagePaths") && has(self, "setNeedPreviewInMultiTake:") &&
+        integer(self, "currentImagePickerMode") == 2 &&
+        !boolean(self, "isRetakeMode")) {
         id pages = ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("selectedImagePaths"));
         if ([pages respondsToSelector:@selector(count)] && [pages count] > 0) {
-            setBool(self, "setNeedPreviewInMultiTake:", YES);
+            // Follow native saving; do not force another confirmation screen.
+            // Native thumbnail and editing actions remain untouched.
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(
+                self, sel_registerName("setNeedPreviewInMultiTake:"), NO);
         }
     }
     originalDone(self, selector, sender);
-}
-static void finish(id self, SEL selector, id preview, id pages) {
-    BOOL adapting = batchCamera(self);
-    if (adapting) {
-        objc_setAssociatedObject(self, &finishingReviewKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        setBool(self, "setNeedPreviewInMultiTake:", NO);
-    }
-    @try {
-        originalFinish(self, selector, preview, pages);
-    } @finally {
-        if (adapting) objc_setAssociatedObject(self, &finishingReviewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
 }
 static BOOL typeMatches(char *type, const char *allowed) {
     BOOL match = type && strchr(allowed, type[0]) != NULL;
@@ -84,15 +63,11 @@ int REAInstallFlowHooks(void) {
     Class maker = objc_getClass("CSImagePickerCameraFactory");
     Method factoryMethod = class_getInstanceMethod(maker, sel_registerName("createConfigurationWithMode:fromController:extra:"));
     Method doneMethod = class_getInstanceMethod(camera, sel_registerName("doneButtonDidClicked:"));
-    Method finishMethod = class_getInstanceMethod(camera, sel_registerName("previewController:finishMultiTakePhoto:"));
-    if (!valid(factoryMethod, 5, "@", "qQiI") ||
-        !valid(doneMethod, 3, "v", "@") || !valid(finishMethod, 4, "v", "@")) return 0;
+    if (!valid(factoryMethod, 5, "@", "qQiI") || !valid(doneMethod, 3, "v", "@")) return 0;
     originalFactory = (void *)method_getImplementation(factoryMethod);
     originalDone = (void *)method_getImplementation(doneMethod);
-    originalFinish = (void *)method_getImplementation(finishMethod);
     method_setImplementation(factoryMethod, (IMP)factory);
     method_setImplementation(doneMethod, (IMP)done);
-    method_setImplementation(finishMethod, (IMP)finish);
     installed = YES;
     return 1;
 }
