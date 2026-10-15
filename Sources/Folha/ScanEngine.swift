@@ -38,16 +38,48 @@ enum ScanEngine {
         }
     }
 
+    private static func quadArea(_ tl: CGPoint, _ tr: CGPoint, _ br: CGPoint, _ bl: CGPoint) -> Double {
+        let x1 = Double(tl.x), y1 = Double(tl.y)
+        let x2 = Double(tr.x), y2 = Double(tr.y)
+        let x3 = Double(br.x), y3 = Double(br.y)
+        let x4 = Double(bl.x), y4 = Double(bl.y)
+        return 0.5 * abs((x1 * y2 - y1 * x2) + (x2 * y3 - y2 * x3) + (x3 * y4 - y3 * x4) + (x4 * y1 - y4 * x1))
+    }
+
     static func detectCorners(_ image: CGImage) throws -> PageCorners? {
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        let docRequest = VNDetectDocumentSegmentationRequest()
+        if (try? handler.perform([docRequest])) != nil,
+           let doc = docRequest.results?.first, doc.confidence >= 0.55 {
+            let area = quadArea(doc.topLeft, doc.topRight, doc.bottomRight, doc.bottomLeft)
+            if area >= 0.08 && area <= 0.965 {
+                let candidate = PageCorners(
+                    topLeft: .init(doc.topLeft), topRight: .init(doc.topRight),
+                    bottomLeft: .init(doc.bottomLeft), bottomRight: .init(doc.bottomRight)
+                )
+                if EditorGeometry.isValid(candidate) { return candidate }
+            }
+        }
         let request = VNDetectRectanglesRequest()
-        request.maximumObservations = 1
-        request.minimumConfidence = 0.6
-        request.minimumSize = 0.2
-        request.minimumAspectRatio = 0.2
-        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-        guard let rectangle = request.results?.first else { return nil }
-        return PageCorners(topLeft: .init(rectangle.topLeft), topRight: .init(rectangle.topRight),
-                           bottomLeft: .init(rectangle.bottomLeft), bottomRight: .init(rectangle.bottomRight))
+        request.maximumObservations = 5
+        request.minimumConfidence = 0.35
+        request.minimumSize = 0.12
+        request.minimumAspectRatio = 0.15
+        request.quadratureTolerance = 35
+        try handler.perform([request])
+        let best = (request.results ?? [])
+            .filter { obs in
+                let area = quadArea(obs.topLeft, obs.topRight, obs.bottomRight, obs.bottomLeft)
+                return area >= 0.06 && area <= 0.965
+            }
+            .max { a, b in
+                quadArea(a.topLeft, a.topRight, a.bottomRight, a.bottomLeft) <
+                quadArea(b.topLeft, b.topRight, b.bottomRight, b.bottomLeft)
+            }
+        guard let rectangle = best else { return nil }
+        let corners = PageCorners(topLeft: .init(rectangle.topLeft), topRight: .init(rectangle.topRight),
+                                  bottomLeft: .init(rectangle.bottomLeft), bottomRight: .init(rectangle.bottomRight))
+        return EditorGeometry.isValid(corners) ? corners : nil
     }
 
     static func processBase(_ source: UIImage, page: inout ScanPage) throws -> UIImage {
@@ -88,13 +120,20 @@ enum ScanEngine {
         switch page.filter {
         case .natural: break
         case .clean:
-            current = current.applyingFilter("CIColorControls", parameters: [kCIInputContrastKey: 1.14, kCIInputBrightnessKey: 0.02])
-            current = current.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: 0.35])
+            current = removingShadows(current)
+            current = current.applyingFilter("CIColorControls", parameters: [
+                kCIInputContrastKey: 1.32,
+                kCIInputBrightnessKey: 0.03,
+                kCIInputSaturationKey: 1.25
+            ])
+            current = current.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: 0.65])
         case .grayscale:
-            current = current.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
+            current = removingShadows(current)
+            current = current.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0, kCIInputContrastKey: 1.18])
         case .document:
-            current = current.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0, kCIInputContrastKey: 1.6, kCIInputBrightnessKey: 0.04])
-            current = current.applyingFilter("CIColorThreshold", parameters: ["inputThreshold": 0.55])
+            current = removingShadows(current)
+            current = current.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0, kCIInputContrastKey: 1.65, kCIInputBrightnessKey: 0.04])
+            current = current.applyingFilter("CIColorThreshold", parameters: ["inputThreshold": 0.58])
         case .lighten:
             current = current.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: 0.45])
         case .blackAndWhite2:
@@ -310,7 +349,8 @@ enum ScanEngine {
         try autoreleasepool {
             let data = try input.bytes()
             var page = ScanPage(id: id, sourceFile: "\(id.uuidString)-\(UUID().uuidString).source",
-                                renderedFile: "", thumbnailFile: "", autoCrop: input.autoCrop)
+                                renderedFile: "", thumbnailFile: "", filter: input.initialFilter,
+                                autoCrop: input.autoCrop, corners: input.initialCorners)
             // A new capture invalidates geometry, overlays and OCR, but not the
             // user's selected appearance. Keep every historical source intact.
             if let previous = previous {

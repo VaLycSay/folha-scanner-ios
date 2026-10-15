@@ -115,14 +115,22 @@ struct ScanDocument: Codable, Hashable, Identifiable {
     var searchableText: String { pages.flatMap(\.lines).map(\.text).joined(separator: "\n") }
 }
 
+struct CapturedScanPage: Hashable {
+    var data: Data
+    var corners: PageCorners?
+    var filter: PageFilter = .clean
+    var autoCrop: Bool = true
+}
+
 enum ScanInput {
     case camera(UIImage)
     case rawCamera(UIImage)
     case photo(Data)
+    case scannedPage(Data, corners: PageCorners? = nil, filter: PageFilter = .clean, autoCrop: Bool = true)
 
     func bytes() throws -> Data {
         switch self {
-        case .photo(let data): return data
+        case .photo(let data), .scannedPage(let data, _, _, _): return data
         case .camera(let image), .rawCamera(let image):
             guard let data = image.jpegData(compressionQuality: ScanConfiguration.cameraJPEGQuality) else {
                 throw ScanFailure.message("Nao foi possivel guardar a imagem capturada.")
@@ -135,6 +143,21 @@ enum ScanInput {
         switch self {
         case .camera: return false // VisionKit has already offered crop correction.
         case .photo, .rawCamera: return true
+        case .scannedPage(_, _, _, let crop): return crop
+        }
+    }
+
+    var initialCorners: PageCorners? {
+        switch self {
+        case .scannedPage(_, let corners, _, _): return corners
+        default: return nil
+        }
+    }
+
+    var initialFilter: PageFilter {
+        switch self {
+        case .scannedPage(_, _, let filter, _): return filter
+        default: return .natural
         }
     }
 }

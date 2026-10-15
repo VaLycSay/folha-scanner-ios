@@ -41,7 +41,7 @@ final class ScannerShellTests: XCTestCase {
         let share = app.buttons["document.share"]
         XCTAssertTrue(share.waitForExistence(timeout: 40)); share.tap()
         XCTAssertTrue(app.descendants(matching: .any)["export.screen"].waitForExistence(timeout: 20))
-        for format in ["PDF", "JPG", "TXT"] { XCTAssertTrue(app.buttons["export.\(format)"].exists) }
+        for format in ["PDF", "JPG", "TXT", "WORD", "EXCEL"] { XCTAssertTrue(app.buttons["export.\(format)"].exists) }
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "REA-v04-export-panel"; shot.lifetime = .keepAlways; add(shot)
     }

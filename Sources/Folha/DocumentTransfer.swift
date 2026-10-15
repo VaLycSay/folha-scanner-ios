@@ -141,6 +141,81 @@ enum DocumentTransfer {
         }
     }
 
+    static func exportWord(document: ScanDocument, root: URL) async throws -> URL {
+        try await offMain {
+            _ = try renderedFiles(document: document, root: root)
+            return try withExportDirectory { directory in
+                let output = directory.appendingPathComponent(fileName(document, index: nil, suffix: "doc"))
+                func escapeHTML(_ text: String) -> String {
+                    text.replacingOccurrences(of: "&", with: "&amp;")
+                        .replacingOccurrences(of: "<", with: "&lt;")
+                        .replacingOccurrences(of: ">", with: "&gt;")
+                }
+                var body = "<html><head><meta charset=\"utf-8\"><title>\(escapeHTML(document.title))</title>"
+                body += "<style>body{font-family:-apple-system,Calibri,Arial,sans-serif;margin:32pt;line-height:1.45;}h1{color:#111214;font-size:18pt;}h2{color:#17C99B;font-size:12pt;margin-top:20pt;}p{font-size:11pt;margin:4pt 0;}</style></head><body>"
+                body += "<h1>\(escapeHTML(document.title))</h1>"
+                for (index, page) in document.pages.enumerated() {
+                    body += "<h2>Página \(index + 1)</h2>"
+                    let lines = visiblePageLines(page)
+                    if lines.isEmpty {
+                        body += "<p><em>(Sem texto reconhecido nesta página)</em></p>"
+                    } else {
+                        for line in lines {
+                            body += "<p>\(escapeHTML(line.text))</p>"
+                        }
+                    }
+                }
+                body += "</body></html>"
+                try Data(body.utf8).write(to: output, options: .atomic)
+                return output
+            }
+        }
+    }
+
+    static func exportExcelCSV(document: ScanDocument, root: URL) async throws -> URL {
+        try await offMain {
+            _ = try renderedFiles(document: document, root: root)
+            return try withExportDirectory { directory in
+                let output = directory.appendingPathComponent(fileName(document, index: nil, suffix: "csv"))
+                func csvCell(_ value: String) -> String {
+                    let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
+                    return "\"\(escaped)\""
+                }
+                var rows: [String] = ["\"Pagina\",\"Coluna 1\",\"Coluna 2\",\"Coluna 3\",\"Coluna 4\""]
+                for (pageIndex, page) in document.pages.enumerated() {
+                    let sortedTopDown = visiblePageLines(page).sorted { a, b in
+                        let topA = 1.0 - a.y - a.height
+                        let topB = 1.0 - b.y - b.height
+                        if abs(topA - topB) > 0.022 { return topA < topB }
+                        return a.x < b.x
+                    }
+                    var currentRow: [OCRLine] = []
+                    var currentTop: Double?
+                    for item in sortedTopDown {
+                        let top = 1.0 - item.y - item.height
+                        if let ref = currentTop, abs(top - ref) <= 0.022 {
+                            currentRow.append(item)
+                        } else {
+                            if !currentRow.isEmpty {
+                                let cols = currentRow.sorted { $0.x < $1.x }.map { csvCell($0.text) }
+                                rows.append((["\"\(pageIndex + 1)\""] + cols).joined(separator: ","))
+                            }
+                            currentRow = [item]
+                            currentTop = top
+                        }
+                    }
+                    if !currentRow.isEmpty {
+                        let cols = currentRow.sorted { $0.x < $1.x }.map { csvCell($0.text) }
+                        rows.append((["\"\(pageIndex + 1)\""] + cols).joined(separator: ","))
+                    }
+                }
+                let content = "\u{FEFF}" + rows.joined(separator: "\r\n")
+                try Data(content.utf8).write(to: output, options: .atomic)
+                return output
+            }
+        }
+    }
+
     enum PDFPageSize: String, CaseIterable, Identifiable, Sendable {
         case a4 = "A4"
         case original = "Tamanho original"

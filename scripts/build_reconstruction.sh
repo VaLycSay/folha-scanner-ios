@@ -85,5 +85,7 @@ ditto .build-ci/device/Build/Products/Release-iphoneos/Folha.app artifacts/Paylo
 (cd artifacts && ditto -c -k --keepParent Payload Scanner-REA-0.4.0-unsigned.ipa)
 python3 scripts/check_ipa.py artifacts/Scanner-REA-0.4.0-unsigned.ipa
 shasum -a 256 artifacts/Scanner-REA-0.4.0-unsigned.ipa > artifacts/Scanner-REA-0.4.0-unsigned.sha256
+cp artifacts/Scanner-REA-0.4.0-unsigned.ipa artifacts/CamScanner-Pro-0.5.0-LiveContainer.ipa
+shasum -a 256 artifacts/CamScanner-Pro-0.5.0-LiveContainer.ipa > artifacts/CamScanner-Pro-0.5.0-LiveContainer.sha256
 cp RECONSTRUCTION.md artifacts/LEIA-ME.md
 printf '%s\n' 'IPA compiled; simulator tests passed. Physical camera and signing remain device tests.'
