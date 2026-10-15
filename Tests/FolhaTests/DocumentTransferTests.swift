@@ -341,5 +341,50 @@ final class DocumentTransferTests: XCTestCase {
         await expectFailure(.emptyDocument) { _ = try await DocumentTransfer.exportImages(document: document, root: root) }
         await expectFailure(.emptyDocument) { _ = try await DocumentTransfer.exportText(document: document, root: root) }
         await expectFailure(.emptyBatch) { _ = try await DocumentTransfer.exportPDFs(documents: [], root: root, searchable: false) }
+        await expectFailure(.emptyBatch) { _ = try await DocumentTransfer.mergePDF(documents: [], root: root, searchable: false) }
+    }
+
+    func testConfiguredPDFSupportsPageSizesAndOrientations() async throws {
+        let root = try root()
+        var document = try makeDocument(root: root, title: "Configuravel")
+        document.pages[0].lines = [line("VISIBLE_A4")]
+        let landscapeA4 = try await DocumentTransfer.exportConfiguredPDF(
+            document: document, root: root, searchable: true, pageSize: .a4, orientation: .landscape)
+        keepForCleanup([landscapeA4])
+        let pdfA4 = try XCTUnwrap(PDFDocument(url: landscapeA4))
+        XCTAssertEqual(pdfA4.pageCount, 1)
+        let boundsA4 = try XCTUnwrap(pdfA4.page(at: 0)?.bounds(for: .mediaBox))
+        XCTAssertEqual(boundsA4.width, 842, accuracy: 1)
+        XCTAssertEqual(boundsA4.height, 595, accuracy: 1)
+        XCTAssertTrue((pdfA4.string ?? "").contains("VISIBLE_A4"))
+
+        let originalPortrait = try await DocumentTransfer.exportConfiguredPDF(
+            document: document, root: root, searchable: false, pageSize: .original, orientation: .auto)
+        keepForCleanup([originalPortrait])
+        let pdfOriginal = try XCTUnwrap(PDFDocument(url: originalPortrait))
+        let boundsOriginal = try XCTUnwrap(pdfOriginal.page(at: 0)?.bounds(for: .mediaBox))
+        XCTAssertEqual(boundsOriginal.width, 200, accuracy: 1)
+        XCTAssertEqual(boundsOriginal.height, 300, accuracy: 1)
+    }
+
+    func testMergePDFCombinesMultipleDocumentsAndDropsRedactedText() async throws {
+        let root = try root()
+        var first = try makeDocument(root: root, title: "DocA")
+        first.pages[0].overlays = [topMask()]
+        first.pages[0].lines = [line("REDACTED_SECRET", y: 0.8), line("KEEP_FIRST")]
+        var second = try makeDocument(root: root, title: "DocB", colors: [.white, .white])
+        second.pages[0].lines = [line("KEEP_SECOND")]
+        second.pages[1].lines = [line("KEEP_THIRD")]
+
+        let mergedURL = try await DocumentTransfer.mergePDF(
+            documents: [first, second], root: root, searchable: true, pageSize: .letter, orientation: .portrait)
+        keepForCleanup([mergedURL])
+        let merged = try XCTUnwrap(PDFDocument(url: mergedURL))
+        XCTAssertEqual(merged.pageCount, 3)
+        let text = merged.string ?? ""
+        XCTAssertTrue(text.contains("KEEP_FIRST"))
+        XCTAssertTrue(text.contains("KEEP_SECOND"))
+        XCTAssertTrue(text.contains("KEEP_THIRD"))
+        XCTAssertFalse(text.contains("REDACTED_SECRET"))
     }
 }

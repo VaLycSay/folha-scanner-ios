@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: scanner-rea-build
+  group: scanner-gemini-build
   cancel-in-progress: false
 jobs:
   build:

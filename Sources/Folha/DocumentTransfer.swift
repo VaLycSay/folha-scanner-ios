@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import CoreGraphics
+import CoreText
 import ImageIO
 
 /// Independent, local-only import/export. No PDF actions, JavaScript, web views,
@@ -139,6 +140,32 @@ enum DocumentTransfer {
         }
     }
 
+    enum PDFPageSize: String, CaseIterable, Identifiable, Sendable {
+        case a4 = "A4"
+        case original = "Tamanho original"
+        case letter = "Carta (Letter)"
+        case legal = "Oficio (Legal)"
+
+        var id: String { rawValue }
+
+        var pointsSize: CGSize? {
+            switch self {
+            case .a4: return CGSize(width: 595, height: 842)
+            case .original: return nil
+            case .letter: return CGSize(width: 612, height: 792)
+            case .legal: return CGSize(width: 612, height: 1008)
+            }
+        }
+    }
+
+    enum PDFPageOrientation: String, CaseIterable, Identifiable, Sendable {
+        case auto = "Auto"
+        case portrait = "Retrato"
+        case landscape = "Paisagem"
+
+        var id: String { rawValue }
+    }
+
     static func exportPDFs(documents: [ScanDocument], root: URL, searchable: Bool) async throws -> [URL] {
         try await offMain {
             guard !documents.isEmpty else { throw Failure.emptyBatch }
@@ -165,6 +192,41 @@ enum DocumentTransfer {
                     result.append(output)
                 }
                 return result
+            }
+        }
+    }
+
+    static func exportConfiguredPDF(document: ScanDocument, root: URL, searchable: Bool,
+                                    pageSize: PDFPageSize = .a4,
+                                    orientation: PDFPageOrientation = .auto) async throws -> URL {
+        try await offMain {
+            let files = try renderedFiles(document: document, root: root)
+            return try withExportDirectory { directory in
+                let output = directory.appendingPathComponent(fileName(document, index: nil, suffix: "pdf"))
+                try renderConfiguredPDF(batches: [(document, files)], title: document.title, output: output,
+                                        searchable: searchable, pageSize: pageSize, orientation: orientation)
+                return output
+            }
+        }
+    }
+
+    static func mergePDF(documents: [ScanDocument], root: URL, searchable: Bool,
+                         pageSize: PDFPageSize = .a4,
+                         orientation: PDFPageOrientation = .auto) async throws -> URL {
+        try await offMain {
+            guard !documents.isEmpty else { throw Failure.emptyBatch }
+            var batches: [(ScanDocument, [URL])] = []
+            for document in documents {
+                try Task.checkCancellation()
+                batches.append((document, try renderedFiles(document: document, root: root)))
+            }
+            return try withExportDirectory { directory in
+                let primaryTitle = documents.first?.title ?? "Mesclado"
+                let mergedDoc = ScanDocument(title: "\(primaryTitle)-Mesclado")
+                let output = directory.appendingPathComponent(fileName(mergedDoc, index: nil, suffix: "pdf"))
+                try renderConfiguredPDF(batches: batches, title: mergedDoc.title, output: output,
+                                        searchable: searchable, pageSize: pageSize, orientation: orientation)
+                return output
             }
         }
     }
@@ -308,20 +370,20 @@ enum DocumentTransfer {
         box.width >= 1 && box.height >= 1 && box.width <= 14_400 && box.height <= 14_400
     }
 
-    private static func visiblePageText(_ page: ScanPage) -> String {
+    private static func visiblePageLines(_ page: ScanPage) -> [OCRLine] {
         let masks = (page.overlays ?? []).filter { $0.kind == .redaction }
-        guard !masks.isEmpty else { return page.lines.map(\.text).joined(separator: "\n") }
+        guard !masks.isEmpty else { return page.lines }
         guard masks.count <= 512, page.width > 0, page.height > 0,
-              page.width <= 3202, page.height <= 3202 else { return "" }
+              page.width <= 3202, page.height <= 3202 else { return [] }
         let width = Double(page.width), height = Double(page.height)
         var boxes: [CGRect] = []
         for mask in masks {
             let right = mask.x + mask.width, bottom = mask.y + mask.height
             guard [mask.x, mask.y, mask.width, mask.height, right, bottom].allSatisfy({ $0.isFinite }),
-                  mask.width > 0, mask.height > 0 else { return "" }
+                  mask.width > 0, mask.height > 0 else { return [] }
             let left = max(0, mask.x), top = max(0, mask.y)
             let clippedRight = min(1, right), clippedBottom = min(1, bottom)
-            guard clippedRight > left, clippedBottom > top else { return "" }
+            guard clippedRight > left, clippedBottom > top else { return [] }
             // Match integral raster masks and add one pixel of safety at the edge.
             let x = (floor(left * width) - 1) / width
             let y = (floor(top * height) - 1) / height
@@ -329,19 +391,115 @@ enum DocumentTransfer {
                 width: (ceil(clippedRight * width) + 1) / width - x,
                 height: (ceil(clippedBottom * height) + 1) / height - y))
         }
-        var lines: [String] = []
+        var kept: [OCRLine] = []
         for line in page.lines {
             let right = line.x + line.width, upper = line.y + line.height
             guard [line.x, line.y, line.width, line.height, right, upper].allSatisfy({ $0.isFinite }),
                   line.x >= 0, line.y >= 0, line.width > 0, line.height > 0,
-                  right <= 1, upper <= 1 else { return "" }
+                  right <= 1, upper <= 1 else { return [] }
             let bounds = CGRect(x: line.x, y: 1 - upper, width: line.width, height: line.height)
             let covered = boxes.contains {
                 bounds.minX <= $0.maxX && bounds.maxX >= $0.minX && bounds.minY <= $0.maxY && bounds.maxY >= $0.minY
             }
-            if !covered { lines.append(line.text) }
+            if !covered { kept.append(line) }
         }
-        return lines.joined(separator: "\n")
+        return kept
+    }
+
+    private static func visiblePageText(_ page: ScanPage) -> String {
+        visiblePageLines(page).map(\.text).joined(separator: "\n")
+    }
+
+    private static func configuredPDFBounds(imageSize: CGSize, pageSize: PDFPageSize, orientation: PDFPageOrientation) -> CGRect {
+        if let paper = pageSize.pointsSize {
+            let portrait = CGSize(width: min(paper.width, paper.height), height: max(paper.width, paper.height))
+            let landscape = CGSize(width: max(paper.width, paper.height), height: min(paper.width, paper.height))
+            switch orientation {
+            case .portrait: return CGRect(origin: .zero, size: portrait)
+            case .landscape: return CGRect(origin: .zero, size: landscape)
+            case .auto: return CGRect(origin: .zero, size: imageSize.width > imageSize.height ? landscape : portrait)
+            }
+        }
+        let baseWidth = max(72, imageSize.width)
+        let baseHeight = max(72, imageSize.height)
+        switch orientation {
+        case .auto:
+            return CGRect(x: 0, y: 0, width: baseWidth, height: baseHeight)
+        case .portrait:
+            return CGRect(x: 0, y: 0, width: min(baseWidth, baseHeight), height: max(baseWidth, baseHeight))
+        case .landscape:
+            return CGRect(x: 0, y: 0, width: max(baseWidth, baseHeight), height: min(baseWidth, baseHeight))
+        }
+    }
+
+    private static func renderConfiguredPDF(batches: [(ScanDocument, [URL])], title: String, output: URL,
+                                            searchable: Bool, pageSize: PDFPageSize,
+                                            orientation: PDFPageOrientation) throws {
+        let format = UIGraphicsPDFRendererFormat()
+        format.documentInfo = [kCGPDFContextTitle as String: safeTitle(title), kCGPDFContextCreator as String: "Folha"]
+        let defaultBounds = CGRect(origin: .zero, size: pageSize.pointsSize ?? ScanConfiguration.pageSize)
+        let renderer = UIGraphicsPDFRenderer(bounds: defaultBounds, format: format)
+        var renderFailure: Error?
+        var pageOrdinal = 0
+        let data = renderer.pdfData { pdf in
+            for (document, files) in batches {
+                for (index, page) in document.pages.enumerated() {
+                    pageOrdinal += 1
+                    autoreleasepool {
+                        do {
+                            try Task.checkCancellation()
+                            let stored = try decodedImage(readFile(files[index]))
+                            let masks = (page.overlays ?? []).filter { $0.kind == .redaction }
+                            let protected = try ScanEngine.renderOverlays(stored, overlays: masks)
+                            let bounds = configuredPDFBounds(imageSize: protected.size, pageSize: pageSize, orientation: orientation)
+                            pdf.beginPage(withBounds: bounds, pageInfo: [:])
+                            let inset = (pageSize == .original && bounds.size == protected.size)
+                                ? bounds
+                                : bounds.insetBy(dx: ScanConfiguration.pageMargin, dy: ScanConfiguration.pageMargin)
+                            let frame = ScanEngine.fit(protected.size, inside: inset.width > 0 && inset.height > 0 ? inset : bounds)
+                            protected.draw(in: frame)
+                            if searchable {
+                                let lines = visiblePageLines(page)
+                                drawSearchableText(lines, frame: frame, context: pdf.cgContext, pageHeight: bounds.height)
+                            }
+                        } catch let failure as Failure {
+                            renderFailure = failure
+                        } catch {
+                            renderFailure = Failure.pageExportFailed(pageOrdinal, error.localizedDescription)
+                        }
+                    }
+                    if renderFailure != nil { break }
+                }
+                if renderFailure != nil { break }
+            }
+        }
+        if let failure = renderFailure { throw failure }
+        try data.write(to: output, options: .atomic)
+    }
+
+    private static func drawSearchableText(_ lines: [OCRLine], frame: CGRect, context: CGContext, pageHeight: CGFloat) {
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.translateBy(x: 0, y: pageHeight)
+        context.scaleBy(x: 1, y: -1)
+        context.textMatrix = .identity
+        context.setTextDrawingMode(.invisible)
+        for item in lines where !item.text.isEmpty {
+            let box = item.bounds
+            let height = max(1, box.height * frame.height)
+            let font = CTFontCreateWithName("Helvetica" as CFString, height * 0.8, nil)
+            let attributed = NSAttributedString(string: item.text, attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font])
+            let line = CTLineCreateWithAttributedString(attributed as CFAttributedString)
+            let width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+            guard width > 0, box.width > 0 else { continue }
+            context.saveGState()
+            context.translateBy(x: frame.minX + box.minX * frame.width,
+                                y: pageHeight - frame.maxY + box.minY * frame.height)
+            context.scaleBy(x: box.width * frame.width / width, y: 1)
+            context.textPosition = .zero
+            CTLineDraw(line, context)
+            context.restoreGState()
+        }
     }
 
     private static func renderedFiles(document: ScanDocument, root: URL) throws -> [URL] {

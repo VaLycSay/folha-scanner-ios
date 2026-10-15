@@ -1,0 +1,13 @@
+{
+  "scope": "local static checks only",
+  "plist_valid": true,
+  "xtool_plist_no_xcode_placeholders": true,
+  "project_yaml_valid": true,
+  "bash_syntax_valid": true,
+  "python_syntax_valid": true,
+  "swift_compiled": false,
+  "xctest_executed": false,
+  "ipa_built": false,
+  "xctest_cases_written": 10,
+  "cloud_upload_authorized": false
+}

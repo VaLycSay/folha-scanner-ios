@@ -40,11 +40,16 @@ private enum HomeTool: String, CaseIterable, Identifiable {
     }
 }
 
+enum ScannerRoute: Hashable {
+    case document(UUID, startWithText: Bool)
+    case pageEditor(documentID: UUID, pageID: UUID)
+}
+
 struct ScannerHomeScreen: View {
     @EnvironmentObject private var store: DocumentStore
     @State private var tab: HomeTab = .home
     @State private var search = ""
-    @State private var path: [UUID] = []
+    @State private var path: [ScannerRoute] = []
     @State private var camera = false
     @State private var photoPicker = false
     @State private var filePicker = false
@@ -54,7 +59,6 @@ struct ScannerHomeScreen: View {
     @State private var alphabetical = false
     @State private var selected: Set<UUID> = []
     @State private var tool: HomeTool?
-    @State private var textDestination: UUID?
     @State private var share: ExportFileSet?
 
     private var documents: [ScanDocument] {
@@ -90,11 +94,20 @@ struct ScannerHomeScreen: View {
                 .navigationTitle("Documentos").navigationBarTitleDisplayMode(.inline)
                 .toolbar(.hidden, for: .navigationBar)
                 .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
-                .navigationDestination(for: UUID.self) { id in ScannerDocumentScreen(id: id, startWithText: textDestination == id) }
+                .navigationDestination(for: ScannerRoute.self) { route in
+                    switch route {
+                    case .document(let id, let startWithText):
+                        ScannerDocumentScreen(id: id, startWithText: startWithText) { pageID in
+                            path.append(.pageEditor(documentID: id, pageID: pageID))
+                        }
+                    case .pageEditor(let documentID, let pageID):
+                        RecoveredPageEditor(documentID: documentID, pageID: pageID)
+                    }
+                }
                 .fullScreenCover(isPresented: $camera) {
                     NativeCameraSheet(onFinish: { bytes in
                         camera = false
-                        store.create(inputs: bytes.map(ScanInput.photo)) { path.append($0.id) }
+                        store.create(inputs: bytes.map(ScanInput.photo)) { path.append(.document($0.id, startWithText: false)) }
                     }, onCancel: { camera = false }, onError: { camera = false; store.error = $0 }).ignoresSafeArea()
                 }
                 .photosPicker(isPresented: $photoPicker, selection: $photos, maxSelectionCount: 50, matching: .images)
@@ -103,7 +116,7 @@ struct ScannerHomeScreen: View {
                     working = true
                     Task { @MainActor in
                         defer { working = false; photos = [] }
-                        do { store.create(inputs: try await loadScannerPhotos(values)) { path.append($0.id) } }
+                        do { store.create(inputs: try await loadScannerPhotos(values)) { path.append(.document($0.id, startWithText: false)) } }
                         catch { store.error = error.localizedDescription }
                     }
                 }
@@ -112,7 +125,7 @@ struct ScannerHomeScreen: View {
                     working = true
                     Task { @MainActor in
                         defer { working = false }
-                        do { store.create(inputs: try await DocumentTransfer.importFile(result.get())) { path.append($0.id) } }
+                        do { store.create(inputs: try await DocumentTransfer.importFile(result.get())) { path.append(.document($0.id, startWithText: false)) } }
                         catch { store.error = error.localizedDescription }
                     }
                 }
@@ -146,7 +159,7 @@ struct ScannerHomeScreen: View {
                             .background(item.color.opacity(0.07), in: Circle())
                         Text(item.rawValue).font(.system(size: 11, weight: .medium)).foregroundStyle(.primary)
                             .multilineTextAlignment(.center).lineLimit(2).frame(height: 28, alignment: .top)
-                    }.frame(maxWidth: .infinity)
+                    }.frame(maxWidth: .infinity).contentShape(Rectangle())
                 }.buttonStyle(.plain).accessibilityIdentifier("library.tool.\(item.id)")
             }
         }
@@ -177,21 +190,29 @@ struct ScannerHomeScreen: View {
             } else if grid && tab == .files {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 18) {
                     ForEach(documents) { document in
-                        NavigationLink(value: document.id) {
+                        Button {
+                            path.append(.document(document.id, startWithText: false))
+                        } label: {
                             VStack(alignment: .leading, spacing: 10) {
                                 ScannerThumbnail(document: document, width: 115, height: 152).frame(maxWidth: .infinity)
                                 Text(document.title).font(.subheadline.weight(.medium)).lineLimit(2)
                                 Text("\(document.pages.count) paginas").font(.caption).foregroundStyle(.secondary)
                             }.foregroundStyle(.primary).padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(ScannerAppearance.canvas, in: RoundedRectangle(cornerRadius: 10))
-                        }.buttonStyle(.plain).accessibilityIdentifier("library.document")
+                                .background(ScannerAppearance.canvas, in: RoundedRectangle(cornerRadius: 10)).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("\(document.title), \(document.pages.count) paginas")
+                        .accessibilityIdentifier("library.document")
                     }
                 }
             } else {
                 LazyVStack(spacing: 0) {
                     ForEach(documents) { document in
                         HStack(spacing: 12) {
-                            NavigationLink(value: document.id) {
+                            Button {
+                                path.append(.document(document.id, startWithText: false))
+                            } label: {
                                 HStack(spacing: 13) {
                                     ScannerThumbnail(document: document)
                                     VStack(alignment: .leading, spacing: 8) {
@@ -202,14 +223,18 @@ struct ScannerHomeScreen: View {
                                         }.font(.system(size: 10)).foregroundStyle(.secondary)
                                     }.frame(maxWidth: .infinity, alignment: .leading)
                                 }.foregroundStyle(.primary).contentShape(Rectangle())
-                            }.buttonStyle(.plain).accessibilityIdentifier("library.document")
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("\(document.title), \(document.pages.count) paginas")
+                            .accessibilityIdentifier("library.document")
                             Button {
                                 if selected.contains(document.id) { selected.remove(document.id) } else { selected.insert(document.id) }
                             } label: {
                                 Image(systemName: selected.contains(document.id) ? "checkmark.square.fill" : "square")
                                     .font(.system(size: 19, weight: .light))
                                     .foregroundStyle(selected.contains(document.id) ? ScannerAppearance.accent : Color(.tertiaryLabel))
-                                    .frame(width: 34, height: 44)
+                                    .frame(width: 34, height: 44).contentShape(Rectangle())
                             }.buttonStyle(.plain).accessibilityLabel("Selecionar \(document.title)").accessibilityIdentifier("library.select")
                         }.padding(.vertical, 12)
                         Divider().padding(.leading, 69)
@@ -223,12 +248,19 @@ struct ScannerHomeScreen: View {
         VStack(spacing: 0) {
             Divider()
             if !selected.isEmpty {
-                HStack {
+                HStack(spacing: 14) {
                     Button("Cancelar") { selected.removeAll() }
                     Spacer()
                     Text("\(selected.count) selecionados").font(.caption)
                     Spacer()
-                    Button { shareSelected() } label: { Image(systemName: "square.and.arrow.up") }.accessibilityLabel("Compartilhar PDFs selecionados")
+                    if selected.count > 1 {
+                        Button("Mesclar PDF") { mergeSelected() }
+                            .font(.caption.weight(.semibold))
+                            .accessibilityIdentifier("library.mergeSelected")
+                    }
+                    Button { shareSelected() } label: { Image(systemName: "square.and.arrow.up") }
+                        .accessibilityLabel("Compartilhar PDFs selecionados")
+                        .accessibilityIdentifier("library.shareSelected")
                 }.padding(.horizontal, 22).frame(height: 62)
             } else {
                 HStack(spacing: 0) {
@@ -249,7 +281,7 @@ struct ScannerHomeScreen: View {
         Button { tab = item; selected.removeAll() } label: {
             VStack(spacing: 5) { Image(systemName: item.symbol).font(.system(size: 18)); Text(item.rawValue).font(.system(size: 10)) }
                 .foregroundStyle(tab == item ? ScannerAppearance.accent : ScannerAppearance.mutedInk)
-                .frame(maxWidth: .infinity).frame(height: 55)
+                .frame(maxWidth: .infinity).frame(height: 55).contentShape(Rectangle())
         }.buttonStyle(.plain).accessibilityIdentifier("library.tab.\(item.rawValue)")
     }
 
@@ -275,9 +307,9 @@ struct ScannerHomeScreen: View {
                 Section {
                     ForEach(documents) { document in
                         Button {
-                            textDestination = chosen == .text ? document.id : nil
+                            let openText = chosen == .text
                             tool = nil
-                            path.append(document.id)
+                            path.append(.document(document.id, startWithText: openText))
                         } label: { HStack(spacing: 14) { ScannerThumbnail(document: document); Text(document.title).foregroundStyle(.primary) } }
                     }
                 } header: { Text("Escolha um documento") }
@@ -307,6 +339,16 @@ struct ScannerHomeScreen: View {
             catch { store.error = error.localizedDescription }
         }
     }
+    private func mergeSelected() {
+        let chosen = documents.filter { selected.contains($0.id) }
+        guard !chosen.isEmpty else { return }
+        working = true
+        Task { @MainActor in
+            defer { working = false }
+            do { share = ExportFileSet(urls: [try await DocumentTransfer.mergePDF(documents: chosen, root: store.root, searchable: true)]) }
+            catch { store.error = error.localizedDescription }
+        }
+    }
 }
 
 private struct ScannerThumbnail: View {
@@ -323,10 +365,11 @@ private struct ScannerThumbnail: View {
     }
 }
 
-private struct ScannerDocumentScreen: View {
+struct ScannerDocumentScreen: View {
     @EnvironmentObject private var store: DocumentStore
     let id: UUID
     var startWithText = false
+    var onOpenPage: ((UUID) -> Void)? = nil
     @State private var textMode = false
     @State private var reordering = false
     @State private var rename = false
@@ -340,6 +383,7 @@ private struct ScannerDocumentScreen: View {
     @State private var preview: SharedFile?
     @State private var export = false
     @State private var add = false
+    @State private var fallbackPageID: UUID?
 
     var body: some View {
         Group {
@@ -365,14 +409,21 @@ private struct ScannerDocumentScreen: View {
                         Section {
                             LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 18) {
                                 ForEach(Array(document.pages.enumerated()), id: \.element.id) { index, page in
-                                    NavigationLink { RecoveredPageEditor(documentID: id, pageID: page.id) } label: {
+                                    Button {
+                                        if let onOpenPage { onOpenPage(page.id) }
+                                        else { fallbackPageID = page.id }
+                                    } label: {
                                         VStack(spacing: 8) {
                                             pageImage(page, document: document).frame(height: 200).frame(maxWidth: .infinity)
                                                 .background(ScannerAppearance.surface).overlay(Rectangle().stroke(Color.gray.opacity(0.14)))
                                             HStack { Text("\(index + 1)").font(.caption.weight(.medium)); Spacer(); Text(page.filter.title).font(.caption2).foregroundStyle(.secondary) }
-                                        }.foregroundStyle(.primary)
-                                    }.buttonStyle(.plain).accessibilityIdentifier("document.page")
-                                        .contextMenu { Button("Refazer captura", systemImage: "camera.rotate") { replacement = page.id; camera = true } }
+                                        }.foregroundStyle(.primary).contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityElement(children: .ignore)
+                                    .accessibilityLabel("Pagina \(index + 1), \(page.filter.title), \(page.lines.count) linhas")
+                                    .accessibilityIdentifier("document.page")
+                                    .contextMenu { Button("Refazer captura", systemImage: "camera.rotate") { replacement = page.id; camera = true } }
                                 }
                             }.padding(.vertical, 10)
                         }.listRowBackground(ScannerAppearance.canvas).listRowSeparator(.hidden)
@@ -384,6 +435,9 @@ private struct ScannerDocumentScreen: View {
                 }.listStyle(.plain).scrollContentBackground(.hidden).background(ScannerAppearance.canvas)
                     .accessibilityIdentifier("document.screen")
                     .navigationTitle(document.title).navigationBarTitleDisplayMode(.inline).toolbar(.visible, for: .navigationBar)
+                    .navigationDestination(item: $fallbackPageID) { pageID in
+                        RecoveredPageEditor(documentID: id, pageID: pageID)
+                    }
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
                             Button { title = document.title; rename = true } label: { Image(systemName: "pencil") }
@@ -460,16 +514,18 @@ private struct ScannerDocumentScreen: View {
     private func footerButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 7) { Image(systemName: icon).font(.system(size: 21)); Text(title).font(.system(size: 10)) }
-                .foregroundStyle(.primary).frame(maxWidth: .infinity).frame(height: 44)
+                .foregroundStyle(.primary).frame(maxWidth: .infinity).frame(height: 44).contentShape(Rectangle())
         }.buttonStyle(.plain)
     }
 }
 
-private struct ScannerExportSheet: View {
+struct ScannerExportSheet: View {
     @EnvironmentObject private var store: DocumentStore
     @Environment(\.dismiss) private var dismiss
     let document: ScanDocument
     @State private var searchable = true
+    @State private var pageSize: DocumentTransfer.PDFPageSize = .a4
+    @State private var orientation: DocumentTransfer.PDFPageOrientation = .auto
     @State private var working = false
     @State private var share: ExportFileSet?
     @State private var failure: String?
@@ -491,9 +547,31 @@ private struct ScannerExportSheet: View {
                         }
                     }.padding(.vertical, 12)
                     Text("Compartilhar como").font(.title3.weight(.semibold))
-                    Toggle("PDF pesquisavel (OCR)", isOn: $searchable).font(.subheadline)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("PDF pesquisavel (OCR)", isOn: $searchable).font(.subheadline)
+                        HStack {
+                            Text("Tamanho do PDF").font(.subheadline)
+                            Spacer()
+                            Picker("Tamanho do PDF", selection: $pageSize) {
+                                ForEach(DocumentTransfer.PDFPageSize.allCases) { size in
+                                    Text(size.rawValue).tag(size)
+                                }
+                            }.pickerStyle(.menu).accessibilityIdentifier("export.pdfSize")
+                        }
+                        HStack {
+                            Text("Orientacao").font(.subheadline)
+                            Spacer()
+                            Picker("Orientacao", selection: $orientation) {
+                                ForEach(DocumentTransfer.PDFPageOrientation.allCases) { mode in
+                                    Text(mode.rawValue).tag(mode)
+                                }
+                            }.pickerStyle(.menu).accessibilityIdentifier("export.pdfOrientation")
+                        }
+                    }.padding(16).background(ScannerAppearance.surface, in: RoundedRectangle(cornerRadius: 14))
                     VStack(spacing: 0) {
-                        exportRow("PDF", subtitle: "Todas as paginas em um documento", icon: "doc.richtext", color: .red) { try await DocumentTransfer.exportPDFs(documents: [document], root: store.root, searchable: searchable) }
+                        exportRow("PDF", subtitle: "Todas as paginas (\(pageSize.rawValue), \(orientation.rawValue))", icon: "doc.richtext", color: .red) {
+                            [try await DocumentTransfer.exportConfiguredPDF(document: document, root: store.root, searchable: searchable, pageSize: pageSize, orientation: orientation)]
+                        }
                         Divider()
                         exportRow("JPG", subtitle: "Uma imagem por pagina, em ordem", icon: "photo", color: .orange) { try await DocumentTransfer.exportImages(document: document, root: store.root) }
                         Divider()
