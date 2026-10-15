@@ -95,7 +95,7 @@ struct ScannerHomeScreen: View {
                 .accessibilityIdentifier("library.screen")
                 .navigationTitle("Documentos").navigationBarTitleDisplayMode(.inline)
                 .toolbar(.hidden, for: .navigationBar)
-                .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
+                .safeAreaInset(edge: .bottom, spacing: 0) { if path.isEmpty { bottomBar } }
                 .navigationDestination(for: ScannerRoute.self) { route in
                     switch route {
                     case .document(let id, let startWithText):
@@ -141,7 +141,7 @@ struct ScannerHomeScreen: View {
     private var searchField: some View {
         HStack(spacing: 9) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Pesquisar documentos e texto", text: $search).font(.subheadline).accessibilityIdentifier("library.search")
+            ScannerSearchField(text: $search).frame(height: 28)
             if !search.isEmpty {
                 Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
                     .accessibilityLabel("Limpar pesquisa")
@@ -419,13 +419,9 @@ struct ScannerDocumentScreen: View {
                                             pageImage(page, document: document).frame(height: 200).frame(maxWidth: .infinity)
                                                 .background(ScannerAppearance.surface).overlay(Rectangle().stroke(Color.gray.opacity(0.14)))
                                             HStack { Text("\(index + 1)").font(.caption.weight(.medium)); Spacer(); Text(page.filter.title).font(.caption2).foregroundStyle(.secondary) }
-                                        }.foregroundStyle(.primary).contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityElement(children: .ignore)
-                                    .accessibilityLabel("Pagina \(index + 1), \(page.filter.title), \(page.lines.count) linhas")
-                                    .accessibilityIdentifier("document.page")
-                                    .contextMenu { Button("Refazer captura", systemImage: "camera.rotate") { replacement = page.id; camera = true } }
+                                        }.foregroundStyle(.primary)
+                                    }.buttonStyle(.plain).accessibilityIdentifier("document.page")
+                                        .contextMenu { Button("Refazer captura", systemImage: "camera.rotate") { replacement = page.id; camera = true } }
                                 }
                             }.padding(.vertical, 10)
                         }.listRowBackground(ScannerAppearance.canvas).listRowSeparator(.hidden)
@@ -616,6 +612,36 @@ struct ScannerExportSheet: View {
 }
 
 private struct ExportFileSet: Identifiable { let id = UUID(); let urls: [URL] }
+private struct ScannerSearchField: UIViewRepresentable {
+    @Binding var text: String
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+    func makeUIView(context: Context) -> UITextField {
+        let field = UITextField()
+        field.placeholder = "Pesquisar documentos e texto"
+        field.font = UIFont.preferredFont(forTextStyle: .subheadline)
+        field.adjustsFontForContentSizeCategory = true
+        field.borderStyle = .none
+        field.backgroundColor = .clear
+        field.returnKeyType = .search
+        field.autocapitalizationType = .none
+        field.accessibilityIdentifier = "library.search"
+        field.isAccessibilityElement = true
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.delegate = context.coordinator
+        field.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .editingChanged)
+        return field
+    }
+    func updateUIView(_ field: UITextField, context: Context) {
+        context.coordinator.text = $text
+        if field.text != text { field.text = text }
+    }
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        var text: Binding<String>
+        init(text: Binding<String>) { self.text = text }
+        @objc func changed(_ sender: UITextField) { text.wrappedValue = sender.text ?? "" }
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool { textField.resignFirstResponder(); return true }
+    }
+}
 private struct ScannerActivitySheet: UIViewControllerRepresentable {
     let urls: [URL]
     func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: urls, applicationActivities: nil) }

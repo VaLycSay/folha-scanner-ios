@@ -3,6 +3,7 @@ import UIKit
 import CoreGraphics
 import CoreText
 import ImageIO
+import PDFKit
 
 /// Independent, local-only import/export. No PDF actions, JavaScript, web views,
 /// document converters, or original-image fallback are used here.
@@ -301,7 +302,16 @@ enum DocumentTransfer {
     }
 
     private static func importPDF(_ data: Data) throws -> [ScanInput] {
-        guard let provider = CGDataProvider(data: data as CFData), let pdf = CGPDFDocument(provider) else {
+        guard let provider = CGDataProvider(data: data as CFData) else {
+            throw Failure.invalidPDF
+        }
+        guard let pdf = CGPDFDocument(provider) else {
+            if let diagnostic = PDFDocument(data: data) {
+                guard !diagnostic.isLocked || diagnostic.unlock(withPassword: "") else {
+                    throw Failure.passwordRequired
+                }
+                if diagnostic.pageCount == 0 { throw Failure.emptyPDF }
+            }
             let header = String(decoding: data.prefix(65_536), as: UTF8.self)
             if header.contains("%PDF-"), header.contains("%%EOF"),
                header.contains("/Type /Pages"), header.contains("/Count 0") {
