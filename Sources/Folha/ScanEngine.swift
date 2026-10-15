@@ -40,7 +40,7 @@ enum ScanEngine {
                            bottomLeft: .init(rectangle.bottomLeft), bottomRight: .init(rectangle.bottomRight))
     }
 
-    static func process(_ source: UIImage, page: inout ScanPage) throws -> UIImage {
+    static func processBase(_ source: UIImage, page: inout ScanPage) throws -> UIImage {
         let normalized = normalized(source, maximum: ScanConfiguration.maximumWorkingDimension)
         guard let cg = normalized.cgImage else { throw ScanFailure.message("Imagem sem pixels utilizaveis.") }
         var current = CIImage(cgImage: cg)
@@ -255,5 +255,19 @@ enum ScanEngine {
             CTLineDraw(line, context)
             context.restoreGState()
         }
+    }
+}
+
+extension ScanEngine {
+    static let recoveredManifestName = "document.json"
+
+    static func process(_ source: UIImage, page: inout ScanPage) throws -> UIImage {
+        let base = try processBase(source, page: &page)
+        guard let settings = page.reconstructedAdjustments else { return base }
+        return try RecoveredPixelImage.apply(base, settings: settings)
+    }
+
+    static func recoveredPreview(source: UIImage, page: inout ScanPage) throws -> UIImage {
+        try process(source, page: &page)
     }
 }

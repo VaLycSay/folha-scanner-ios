@@ -53,6 +53,7 @@ struct OCRLine: Codable, Hashable, Identifiable {
 }
 
 struct ScanPage: Codable, Hashable, Identifiable {
+    var reconstructedAdjustments: ReconstructedAdjustmentContract? = nil
     var id: UUID
     var sourceFile: String
     var renderedFile: String

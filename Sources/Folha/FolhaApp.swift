@@ -225,42 +225,6 @@ struct PageScreen: View {
     @State private var showText = false
 
     var body: some View {
-        Group {
-            if let document = store.document(documentID), let page = document.pages.first(where: { $0.id == pageID }) {
-                ScrollView {
-                    VStack(spacing: 20) {
-                        if let image = store.pageImage(page, in: document) {
-                            Image(uiImage: image).resizable().scaledToFit().background(.white).clipShape(RoundedRectangle(cornerRadius: 8))
-                        }
-                        Picker("Filtro", selection: Binding(get: { page.filter }, set: { filter in
-                            var edited = page; edited.filter = filter
-                            store.revise(document: document, page: edited)
-                        })) {
-                            ForEach(PageFilter.allCases) { filter in Text(filter.title).tag(filter) }
-                        }.pickerStyle(.segmented)
-                        HStack {
-                            Button {
-                                var edited = page; edited.quarterTurns = (edited.quarterTurns + 1) % 4
-                                store.revise(document: document, page: edited)
-                            } label: { Label("Girar", systemImage: "rotate.right") }
-                            Spacer()
-                            Button {
-                                var edited = page; edited.autoCrop.toggle(); edited.corners = nil
-                                store.revise(document: document, page: edited)
-                            } label: { Label(page.autoCrop ? "Sem recorte" : "Recortar", systemImage: "crop") }
-                        }.buttonStyle(.bordered)
-                        Button { showText.toggle() } label: { Label(showText ? "Ocultar texto" : "Texto reconhecido", systemImage: "text.viewfinder") }
-                        if let warning = page.ocrWarning { Text(warning).font(.caption).foregroundStyle(.orange) }
-                        if showText {
-                            Text(page.lines.isEmpty ? "Nenhum texto reconhecido nesta pagina." : page.lines.map(\.text).joined(separator: "\n"))
-                                .font(.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                                .padding().background(.white, in: RoundedRectangle(cornerRadius: 12))
-                        }
-                        Text("As edicoes partem da imagem de entrada, sem acumular filtros sobre filtros.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }.padding(18).disabled(store.isBusy)
-                }.background(Palette.paper.ignoresSafeArea()).navigationTitle("Editar pagina").navigationBarTitleDisplayMode(.inline)
-            } else { ContentUnavailableView("Pagina indisponivel", systemImage: "doc") }
-        }
+        RecoveredPageEditor(documentID: documentID, pageID: pageID)
     }
 }

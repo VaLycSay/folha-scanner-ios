@@ -22,8 +22,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.valyc.folha.scanner
         INFOPLIST_FILE: .build-ci/Info-Xcode.plist
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: 0.1.0
-        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 0.2.0
+        CURRENT_PROJECT_VERSION: 2
         SWIFT_EMIT_LOC_STRINGS: YES
   FolhaTests:
     type: bundle.unit-test

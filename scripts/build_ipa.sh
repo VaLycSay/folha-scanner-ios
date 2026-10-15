@@ -24,6 +24,13 @@ Path('.build-ci/Info-Xcode.plist').write_bytes(plistlib.dumps(info))
 PY
 
 xcodegen generate --spec project.yml
+swiftc -parse-as-library \
+  Sources/Folha/ReconstructedAdjustmentContract.swift \
+  Sources/Folha/RecoveredPixelAdjustment.swift \
+  scripts/compare_recovered_pixels.swift \
+  -o .build-ci/compare-recovered-pixels
+.build-ci/compare-recovered-pixels Tests/Fixtures/recovered-pixels.json \
+  | tee reports/recovered-pixels.log
 xcodebuild build \
   -project Folha.xcodeproj \
   -scheme Folha \
