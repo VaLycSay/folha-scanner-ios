@@ -1,230 +1,250 @@
 import SwiftUI
 import PhotosUI
-import VisionKit
-import AVFoundation
-
-private enum Palette {
-    static let paper = Color(red: 0.95, green: 0.95, blue: 0.91)
-    static let ink = Color(red: 0.10, green: 0.23, blue: 0.19)
-    static let accent = Color(red: 0.79, green: 0.91, blue: 0.55)
-}
+import UIKit
 
 @main
 struct FolhaApp: App {
     @StateObject private var store = DocumentStore()
     var body: some Scene {
         WindowGroup {
-            LibraryScreen().environmentObject(store).tint(Palette.ink)
+            LibraryScreen().environmentObject(store)
+                .tint(Color(red: 0.08, green: 0.61, blue: 0.39))
                 .overlay {
                     if store.isBusy {
                         ZStack {
-                            Color.black.opacity(0.20).ignoresSafeArea()
-                            VStack(spacing: 16) {
+                            Color.black.opacity(0.22).ignoresSafeArea()
+                            VStack(spacing: 14) {
                                 ProgressView()
-                                Text(store.progress).font(.callout).multilineTextAlignment(.center)
-                                Text("Processamento local. Nenhum upload.").font(.caption).foregroundStyle(.secondary)
-                            }
-                            .padding(28).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22)).padding(35)
-                        }
+                                Text(store.progress).multilineTextAlignment(.center)
+                                Text("Processamento local no iPhone").font(.caption).foregroundStyle(.secondary)
+                            }.padding(26).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)).padding(35)
+                        }.accessibilityIdentifier("processing.overlay")
                     }
                 }
                 .alert("Nao foi possivel concluir", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {
-                    Button("OK") { store.error = nil }
+                    Button("OK", role: .cancel) { store.error = nil }
                 } message: { Text(store.error ?? "") }
+                .task { store.seedUITestDocumentIfRequested() }
         }
     }
 }
 
-struct LibraryScreen: View {
+private struct LibraryScreen: View {
     @EnvironmentObject private var store: DocumentStore
     @State private var search = ""
-    @State private var showingCamera = false
-    @State private var selectedPhotos: [PhotosPickerItem] = []
-    @State private var loadingPhotos = false
-
-    private var filtered: [ScanDocument] {
-        store.documents.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) || $0.searchableText.localizedCaseInsensitiveContains(search) }
+    @State private var path: [UUID] = []
+    @State private var camera = false
+    @State private var importing = false
+    @State private var photos: [PhotosPickerItem] = []
+    @State private var information = false
+    private var documents: [ScanDocument] {
+        search.isEmpty ? store.documents : store.documents.filter {
+            $0.title.localizedCaseInsensitiveContains(search) || $0.searchableText.localizedCaseInsensitiveContains(search)
+        }
     }
-
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("SEU ARQUIVO, NO SEU IPHONE").font(.system(.caption2, design: .monospaced)).tracking(2)
-                        Text("Papel vira\npossibilidade.").font(.custom("Georgia", size: 40)).foregroundStyle(Palette.ink)
-                        Text("Capture, organize e encontre. Sem conta, anuncios ou assinatura.")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                    }.padding(.top, 8)
-                    HStack(spacing: 12) {
-                        Button(action: openCamera) { Label("Digitalizar", systemImage: "viewfinder").frame(maxWidth: .infinity).padding(.vertical, 9) }
-                            .buttonStyle(.borderedProminent).disabled(store.isBusy || loadingPhotos)
-                        PhotosPicker(selection: $selectedPhotos, matching: .images) {
-                            Label("Importar", systemImage: "photo.on.rectangle").padding(.vertical, 9)
-                        }.buttonStyle(.bordered).disabled(store.isBusy || loadingPhotos)
+        NavigationStack(path: $path) {
+            List {
+                if !store.storageWarnings.isEmpty {
+                    Section {
+                        Label("Documentos preservados que precisam de atencao", systemImage: "exclamationmark.triangle")
+                        ForEach(store.storageWarnings, id: \.self) { Text($0).font(.caption) }
                     }
-                    if loadingPhotos { ProgressView("Lendo fotos selecionadas...") }
-                    if !store.storageWarnings.isEmpty {
-                        Label("\(store.storageWarnings.count) documento(s) precisam de recuperacao. Os arquivos foram preservados.", systemImage: "exclamationmark.triangle")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
-                    HStack {
-                        Text("Documentos").font(.headline)
-                        Spacer()
-                        Text("\(filtered.count)").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
-                    }
-                    if filtered.isEmpty {
-                        ContentUnavailableView(search.isEmpty ? "Seu primeiro documento" : "Nenhum resultado", systemImage: "doc.text.viewfinder", description: Text(search.isEmpty ? "Digitalize uma folha ou importe fotos para comecar." : "Busque pelo nome ou pelo texto reconhecido."))
-                    }
-                    ForEach(filtered) { document in
-                        NavigationLink { DocumentScreen(id: document.id) } label: {
-                            HStack(spacing: 16) {
-                                if let page = document.pages.first, let thumbnail = store.pageImage(page, in: document, thumbnail: true) {
-                                    Image(uiImage: thumbnail).resizable().scaledToFit().frame(width: 58, height: 78).background(.white).clipShape(RoundedRectangle(cornerRadius: 5))
-                                } else { Image(systemName: "doc").font(.largeTitle).frame(width: 58, height: 78) }
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text(document.title).font(.headline).lineLimit(2)
-                                    Text("\(document.pages.count) paginas").font(.caption).foregroundStyle(.secondary)
-                                    Text(document.updatedAt, style: .date).font(.caption2).foregroundStyle(.secondary)
-                                }
-                                Spacer(minLength: 0)
-                                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-                            }.padding(16).background(.white.opacity(0.80), in: RoundedRectangle(cornerRadius: 16))
-                        }.buttonStyle(.plain)
-                    }
-                    Text("PREVIA DE DESENVOLVIMENTO 0.1\nOCR pode errar: confira documentos importantes antes de enviar.")
-                        .font(.caption2).foregroundStyle(.secondary).padding(.top, 16)
-                }.padding(22)
-            }
-            .background(Palette.paper.ignoresSafeArea())
-            .navigationTitle("Folha").navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $search, prompt: "Nome ou texto do documento")
-            .sheet(isPresented: $showingCamera) {
-                CameraSheet(onFinish: { images in
-                    showingCamera = false
-                    store.create(inputs: images.map(ScanInput.camera))
-                }, onCancel: { showingCamera = false }, onError: { failure in
-                    showingCamera = false
-                    store.error = failure.localizedDescription
-                })
-            }
-            .onChange(of: selectedPhotos) { _, selected in
-                guard !selected.isEmpty else { return }
-                loadingPhotos = true
-                Task { @MainActor in
-                    defer { loadingPhotos = false }
-                    do {
-                        var inputs: [ScanInput] = []
-                        for item in selected {
-                            guard let data = try await item.loadTransferable(type: Data.self) else {
-                                throw ScanFailure.message("Uma das fotos nao pode ser lida. O lote nao foi importado.")
-                            }
-                            inputs.append(.photo(data))
+                }
+                if documents.isEmpty {
+                    ContentUnavailableView(search.isEmpty ? "Seus documentos" : "Nenhum resultado", systemImage: "doc.viewfinder", description: Text("Digitalize uma pagina ou importe fotos para comecar."))
+                        .listRowBackground(Color.clear)
+                } else {
+                    Section("\(documents.count) documentos") {
+                        ForEach(documents) { document in
+                            NavigationLink(value: document.id) {
+                                HStack(spacing: 14) {
+                                    DocumentThumbnail(document: document)
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text(document.title).font(.headline).lineLimit(2)
+                                        Text("\(document.pages.count) paginas  |  \(document.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }.padding(.vertical, 4)
+                            }.accessibilityIdentifier("library.document")
                         }
-                        selectedPhotos = []
-                        store.create(inputs: inputs)
-                    } catch { store.error = error.localizedDescription }
+                    }
                 }
             }
-        }
-    }
-
-    private func openCamera() {
-        guard VNDocumentCameraViewController.isSupported else {
-            store.error = "Digitalizacao indisponivel neste dispositivo. Use Importar."
-            return
-        }
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized: showingCamera = true
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { granted in
-                DispatchQueue.main.async {
-                    if granted { showingCamera = true } else { store.error = "A camera precisa de permissao nos Ajustes." }
+            .listStyle(.plain).accessibilityIdentifier("library.screen")
+            .navigationTitle("Documentos")
+            .searchable(text: $search, prompt: "Nome ou texto do documento")
+            .navigationDestination(for: UUID.self) { DocumentScreen(id: $0) }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { information = true } label: { Image(systemName: "info.circle") }
+                        .accessibilityLabel("Sobre esta reconstrucao")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    PhotosPicker(selection: $photos, maxSelectionCount: 50, matching: .images) {
+                        Image(systemName: "photo.on.rectangle.angled")
+                    }.accessibilityLabel("Importar fotos").disabled(store.isBusy || importing)
                 }
             }
-        default: store.error = "Permita o uso da camera nos Ajustes do iPhone, ou importe fotos."
+            .safeAreaInset(edge: .bottom) {
+                Button { camera = true } label: {
+                    Label("Digitalizar", systemImage: "camera.fill").font(.headline).frame(maxWidth: .infinity).padding(.vertical, 14)
+                }.buttonStyle(.borderedProminent).padding().background(.bar)
+                    .disabled(store.isBusy || importing).accessibilityIdentifier("library.scan")
+            }
+            .fullScreenCover(isPresented: $camera) {
+                NativeCameraSheet(onFinish: { bytes in
+                    camera = false
+                    store.create(inputs: bytes.map(ScanInput.photo)) { path.append($0.id) }
+                }, onCancel: { camera = false }, onError: { camera = false; store.error = $0 }).ignoresSafeArea()
+            }
+            .onChange(of: photos) { _, selected in
+                guard !selected.isEmpty, !importing else { return }
+                importing = true
+                Task { @MainActor in
+                    defer { importing = false; photos = [] }
+                    do { store.create(inputs: try await loadPhotos(selected)) { path.append($0.id) } }
+                    catch { store.error = error.localizedDescription }
+                }
+            }
+            .sheet(isPresented: $information) {
+                NavigationStack {
+                    List {
+                        Section("Scanner REA 0.3") {
+                            Text("Reconstrucao independente orientada por evidencias estaticas da versao historica 5.26.12.")
+                            Text("Editor: recorte, rotacao, filtros, ajustes, texto, assinatura, anotacoes, tarjas e OCR. Documentos: varias paginas, reordenacao e PDF pesquisavel.")
+                        }
+                        Section("Limites desta versao") {
+                            Text("Os filtros de imagem e a camera sao implementacoes proprias. A aparencia e o comportamento completo do aplicativo de referencia ainda nao foram comprovados em execucao.")
+                            Text("Nao inclui conta, nuvem, OCR de planilhas, documentos de identidade especializados ou assinatura digital certificada.")
+                            Text("As tarjas protegem o PDF exportado. As imagens originais permanecem localmente para reedicao.")
+                        }
+                    }.navigationTitle("Sobre").toolbar { Button("Fechar") { information = false } }
+                }
+            }
         }
     }
 }
 
-struct DocumentScreen: View {
+private struct DocumentThumbnail: View {
+    @EnvironmentObject private var store: DocumentStore
+    let document: ScanDocument
+    var body: some View {
+        Group {
+            if let page = document.pages.first, let image = store.pageImage(page, in: document, thumbnail: true) {
+                Image(uiImage: image).resizable().scaledToFit()
+            } else { Image(systemName: "doc.text").foregroundStyle(.secondary) }
+        }.frame(width: 56, height: 76).background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.gray.opacity(0.25)))
+    }
+}
+
+private struct DocumentScreen: View {
     @EnvironmentObject private var store: DocumentStore
     let id: UUID
-    @State private var renamedTitle = ""
-    @State private var renaming = false
-    @State private var sharedFile: SharedFile?
-    @State private var previewFile: SharedFile?
     @State private var searchable = true
-
+    @State private var rename = false
+    @State private var title = ""
+    @State private var camera = false
+    @State private var replacement: UUID?
+    @State private var photos: [PhotosPickerItem] = []
+    @State private var importing = false
+    @State private var preview: SharedFile?
+    @State private var sharing: SharedFile?
     var body: some View {
         Group {
             if let document = store.document(id) {
                 List {
                     Section {
-                        Toggle("PDF pesquisavel com OCR", isOn: $searchable)
-                        Text("\(document.pages.count) paginas. Arraste para ordenar no modo Editar.").font(.caption).foregroundStyle(.secondary)
-                        if document.pages.contains(where: { $0.ocrWarning != nil }) {
-                            Label("Ha paginas sem OCR concluido. As imagens continuam disponiveis.", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
-                        }
-                    }
-                    Section("Paginas") {
-                        ForEach(document.pages) { page in
-                            NavigationLink { PageScreen(documentID: id, pageID: page.id) } label: {
+                        ForEach(Array(document.pages.enumerated()), id: \.element.id) { index, page in
+                            NavigationLink {
+                                RecoveredPageEditor(documentID: id, pageID: page.id)
+                            } label: {
                                 HStack(spacing: 14) {
                                     if let image = store.pageImage(page, in: document, thumbnail: true) {
-                                        Image(uiImage: image).resizable().scaledToFit().frame(width: 54, height: 72)
+                                        Image(uiImage: image).resizable().scaledToFit().frame(width: 64, height: 90)
                                     }
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("Pagina \((document.pages.firstIndex(where: { $0.id == page.id }) ?? 0) + 1)").font(.headline)
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text("Pagina \(index + 1)").font(.headline)
                                         Text(page.filter.title).font(.caption).foregroundStyle(.secondary)
-                                        Text(page.lines.first?.text ?? "Sem texto reconhecido").font(.caption2).lineLimit(2).foregroundStyle(.secondary)
+                                        Text(page.lines.first?.text ?? "Sem texto reconhecido").lineLimit(2).font(.caption)
+                                        if let warning = page.ocrWarning { Text(warning).font(.caption2).foregroundStyle(.orange) }
                                     }
                                 }.padding(.vertical, 4)
-                            }
+                            }.accessibilityIdentifier("document.page")
+                                .contextMenu { Button("Refazer captura", systemImage: "camera.rotate") { replacement = page.id; camera = true } }
                         }
-                        .onMove { offsets, destination in store.movePages(document, from: offsets, to: destination) }
-                        .onDelete { offsets in store.removePages(document, at: offsets) }
-                    }
+                        .onMove { store.movePages(document, from: $0, to: $1) }
+                        .onDelete { store.removePages(document, at: $0) }
+                    } header: { Text("\(document.pages.count) paginas") }
+                    footer: { Text("Editar permite ordenar ou retirar paginas. Toque em uma pagina para ajustar imagem e texto.") }
                     Section {
-                        Button {
-                            store.export(document, searchable: searchable) { previewFile = SharedFile(url: $0) }
-                        } label: { Label("Visualizar PDF", systemImage: "doc.richtext") }
-                        Button {
-                            store.export(document, searchable: searchable) { sharedFile = SharedFile(url: $0) }
-                        } label: { Label("Compartilhar PDF", systemImage: "square.and.arrow.up") }
-                    }.disabled(document.pages.isEmpty || store.isBusy)
-                }
-                .navigationTitle(document.title).navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) { EditButton() }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button { renamedTitle = document.title; renaming = true } label: { Image(systemName: "pencil") }
+                        Button { replacement = nil; camera = true } label: { Label("Continuar captura", systemImage: "camera.badge.ellipsis") }
+                        PhotosPicker(selection: $photos, maxSelectionCount: 50, matching: .images) { Label("Adicionar fotos", systemImage: "photo.badge.plus") }
                     }
-                }
-                .alert("Nome do documento", isPresented: $renaming) {
-                    TextField("Nome", text: $renamedTitle)
-                    Button("Cancelar", role: .cancel) {}
-                    Button("Salvar") { store.rename(document, to: renamedTitle) }
-                }
-            } else { ContentUnavailableView("Documento indisponivel", systemImage: "doc") }
-        }
-        .sheet(item: $sharedFile) { ActivitySheet(url: $0.url) }
-        .sheet(item: $previewFile) { file in
-            NavigationStack {
-                PDFPreview(url: file.url).navigationTitle("PDF gerado").navigationBarTitleDisplayMode(.inline)
-                    .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Fechar") { previewFile = nil } } }
-            }
+                    Section("Exportar") {
+                        Toggle("PDF pesquisavel (OCR)", isOn: $searchable)
+                        Button { store.export(document, searchable: searchable) { preview = SharedFile(url: $0) } } label: {
+                            Label("Visualizar PDF", systemImage: "doc.richtext")
+                        }.accessibilityIdentifier("document.previewPDF").disabled(document.pages.isEmpty)
+                        Button { store.export(document, searchable: searchable) { sharing = SharedFile(url: $0) } } label: {
+                            Label("Compartilhar PDF", systemImage: "square.and.arrow.up")
+                        }.disabled(document.pages.isEmpty)
+                    }
+                }.accessibilityIdentifier("document.screen")
+                    .navigationTitle(document.title).navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) { EditButton() }
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button { title = document.title; rename = true } label: { Image(systemName: "pencil") }
+                                .accessibilityLabel("Renomear").accessibilityIdentifier("document.rename")
+                        }
+                    }
+                    .alert("Renomear documento", isPresented: $rename) {
+                        TextField("Nome", text: $title).accessibilityIdentifier("document.renameField")
+                        Button("Cancelar", role: .cancel) { }
+                        Button("Salvar") { store.rename(document, to: title) }
+                    }
+                    .disabled(store.isBusy || importing)
+                    .onChange(of: photos) { _, selected in
+                        guard !selected.isEmpty, !importing else { return }
+                        importing = true
+                        Task { @MainActor in
+                            defer { importing = false; photos = [] }
+                            do { store.append(inputs: try await loadPhotos(selected), to: document) }
+                            catch { store.error = error.localizedDescription }
+                        }
+                    }
+                    .fullScreenCover(isPresented: $camera) {
+                        NativeCameraSheet(singleOnly: replacement != nil, onFinish: { bytes in
+                            camera = false
+                            if let pageID = replacement, let data = bytes.first { store.replace(input: .photo(data), in: document, pageID: pageID) }
+                            else { store.append(inputs: bytes.map(ScanInput.photo), to: document) }
+                            replacement = nil
+                        }, onCancel: { camera = false; replacement = nil }, onError: { camera = false; replacement = nil; store.error = $0 }).ignoresSafeArea()
+                    }
+                    .sheet(item: $preview) { file in
+                        NavigationStack {
+                            PDFPreview(url: file.url).accessibilityIdentifier("pdf.preview")
+                                .navigationTitle("PDF - \(document.pages.count) paginas").navigationBarTitleDisplayMode(.inline)
+                                .toolbar { Button("Fechar") { preview = nil } }
+                        }
+                    }
+                    .sheet(item: $sharing) { ActivitySheet(url: $0.url) }
+            } else { ContentUnavailableView("Documento indisponivel", systemImage: "doc.questionmark") }
         }
     }
 }
 
-struct PageScreen: View {
-    @EnvironmentObject private var store: DocumentStore
-    let documentID: UUID
-    let pageID: UUID
-    @State private var showText = false
-
-    var body: some View {
-        RecoveredPageEditor(documentID: documentID, pageID: pageID)
+@MainActor
+private func loadPhotos(_ items: [PhotosPickerItem]) async throws -> [ScanInput] {
+    var inputs: [ScanInput] = []
+    for item in items {
+        guard let data = try await item.loadTransferable(type: Data.self) else {
+            throw ScanFailure.message("Uma foto nao pode ser importada. Nenhuma pagina foi adicionada.")
+        }
+        inputs.append(.photo(data))
     }
+    return inputs
 }

@@ -12,9 +12,12 @@ final class DocumentStore: ObservableObject {
     let root: URL
     private let worker = DispatchQueue(label: "com.valyc.folha.processing", qos: .userInitiated)
 
-    init() {
-        root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Folha", isDirectory: true)
+    init(root suppliedRoot: URL? = nil) {
+        let testing = ProcessInfo.processInfo.arguments.contains("--uitesting")
+        root = suppliedRoot ?? (testing
+            ? FileManager.default.temporaryDirectory.appendingPathComponent("rea-ui-tests/\(UUID().uuidString)", isDirectory: true)
+            : FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Folha", isDirectory: true))
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
                 attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
@@ -68,10 +71,49 @@ final class DocumentStore: ObservableObject {
         }
     }
 
-    func create(inputs: [ScanInput]) {
+    func create(inputs: [ScanInput], completion: @escaping (ScanDocument) -> Void = { _ in }) {
         let root = self.root
         perform("Preparando paginas e reconhecendo texto...", work: {
             try ScanEngine.create(inputs: inputs, root: root)
+        }, completion: completion)
+    }
+
+    func append(inputs: [ScanInput], to document: ScanDocument) {
+        let root = self.root
+        perform("Adicionando paginas...", work: {
+            try ScanEngine.append(inputs: inputs, to: document, root: root)
+        }, completion: { _ in })
+    }
+
+    func replace(input: ScanInput, in document: ScanDocument, pageID: UUID) {
+        let root = self.root
+        perform("Substituindo a captura...", work: {
+            try ScanEngine.replace(input: input, in: document, pageID: pageID, root: root)
+        }, completion: { _ in })
+    }
+
+    func seedUITestDocumentIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("--uitesting"),
+              ProcessInfo.processInfo.arguments.contains("--seed-test-document"), documents.isEmpty, !isBusy else { return }
+        let root = self.root
+        perform("Preparando documento de teste...", work: {
+            let inputs: [ScanInput] = (1...2).map { number in
+                let format = UIGraphicsImageRendererFormat()
+                format.scale = 1
+                let image = UIGraphicsImageRenderer(size: CGSize(width: 800, height: 1100), format: format).image { context in
+                    UIColor.white.setFill()
+                    context.fill(CGRect(x: 0, y: 0, width: 800, height: 1100))
+                    let text = "DOCUMENTO SINTETICO REA\n\nPagina \(number) de 2\n\nTeste local de leitura e exportacao.\nSem dados pessoais ou documentos reais."
+                    (text as NSString).draw(in: CGRect(x: 60, y: 90, width: 680, height: 800), withAttributes: [
+                        .font: UIFont.systemFont(ofSize: 30), .foregroundColor: UIColor.black
+                    ])
+                }
+                return .camera(image)
+            }
+            var document = try ScanEngine.create(inputs: inputs, root: root)
+            document.title = "Documento de teste REA"
+            try ScanEngine.writeManifest(document, folder: root.appendingPathComponent(document.id.uuidString))
+            return document
         }, completion: { _ in })
     }
 

@@ -1,42 +1,40 @@
-name: Build unsigned iOS app
+name: REA reconstruction - tests and unsigned IPA
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, 'rea-integration-*']
 permissions:
   contents: read
 concurrency:
-  group: folha-ios-${{ github.ref }}
-  cancel-in-progress: true
+  group: scanner-rea-build
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - name: Obtain project generator
         run: |
-          if ! command -v xcodegen >/dev/null; then
-            brew install xcodegen
-          fi
-      - name: Compile and package without Apple login
-        run: bash scripts/build_ipa.sh
-      - name: Keep unsigned IPA
+          if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+      - name: Test recovered flows and package device app
+        run: bash scripts/build_reconstruction.sh
+      - name: Preserve unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Folha-unsigned
+          name: Scanner-REA-0.3.0
           path: |
-            artifacts/Folha-unsigned.ipa
-            artifacts/Folha-unsigned.sha256
-            artifacts/Folha-unsigned.json
-            artifacts/LEIA-ME.txt
+            artifacts/*.ipa
+            artifacts/*.json
+            artifacts/*.sha256
+            artifacts/LEIA-ME.md
           if-no-files-found: error
-          retention-days: 3
-      - name: Keep diagnostics
+          retention-days: 7
+      - name: Preserve test diagnostics and screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Folha-diagnostics
+          name: Scanner-REA-tests
           path: reports/
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 7

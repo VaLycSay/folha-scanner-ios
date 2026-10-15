@@ -1,236 +1,599 @@
 import SwiftUI
 import UIKit
-import Vision
 
-private struct CropVertex: Identifiable {
-    let id: Int
-    var x: Double
-    var y: Double
-    var json: [String: Double] { ["x": x, "y": y] }
+// Serial, versioned work keeps decoding, rendering, pixel loops and Vision off MainActor.
+// Synchronous Core Image/Vision cannot be interrupted; obsolete results are never published.
+private final class EditorImageWorker: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "com.valyc.editor.preview", qos: .userInitiated)
+    private let lock = NSLock()
+    private var revision: UInt64 = 0
+
+    func invalidate(_ value: UInt64) {
+        lock.lock(); revision = value; lock.unlock()
+    }
+    private func accepts(_ value: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return value == revision
+    }
+    func perform<Value>(revision: UInt64, delay: TimeInterval = 0,
+                        work: @escaping () throws -> Value,
+                        completion: @escaping (Result<Value, Error>) -> Void) {
+        queue.asyncAfter(deadline: .now() + delay) { [self] in
+            guard accepts(revision) else { return }
+            let result = autoreleasepool { Result { try work() } }
+            guard accepts(revision) else { return }
+            DispatchQueue.main.async { [self] in
+                guard accepts(revision) else { return }
+                completion(result)
+            }
+        }
+    }
+}
+
+@MainActor
+private final class EditorViewModel: ObservableObject {
+    enum Work { case loading, preview, borders, ocr }
+    enum GeometryChange { case crop, rotate(Int), unlockCrop, detectBorders }
+
+    @Published private(set) var original: ScanPage?
+    @Published private(set) var draft: ScanPage?
+    @Published private(set) var source: UIImage?
+    @Published private(set) var preview: UIImage?
+    @Published private(set) var stage: EditorStage = .crop
+    @Published private(set) var adjustments = EditorAdjustmentState()
+    @Published private(set) var work: Work?
+    @Published private(set) var previewReady = false
+    @Published var saving = false
+    @Published var error: String?
+    @Published var notice: String?
+    @Published var sheet: EditorSheet?
+    @Published var pendingGeometry: GeometryChange?
+    @Published private(set) var recognizedText = ""
+    private var folder: URL?
+    private var cropSnapshot: ScanPage?
+    private var adjustmentSnapshot: ScanPage?
+    private var adjustmentTextSnapshot = ""
+    private var versions = EditorPreviewRevision()
+    private let worker = EditorImageWorker()
+    private var active = false
+
+    var hasChanges: Bool { draft != original }
+    var hasOverlays: Bool { !(draft?.overlays ?? []).isEmpty }
+    var hasOCR: Bool { !(draft?.lines ?? []).isEmpty || !(original?.lines ?? []).isEmpty || !recognizedText.isEmpty }
+    var controlsBlocked: Bool { saving || work == .loading || work == .borders || work == .ocr }
+    var corners: PageCorners {
+        guard let draft, draft.autoCrop else { return EditorGeometry.fullPage }
+        return draft.corners ?? EditorGeometry.fullPage
+    }
+    var turns: Int { ((draft?.quarterTurns ?? 0) % 4 + 4) % 4 }
+    var geometryWarning: String {
+        var result = "O OCR sera invalidado e reconhecido novamente ao salvar."
+        if hasOverlays {
+            result += " Para mudar o recorte ou a orientacao, e necessario remover explicitamente as marcacoes desta revisao. Elas nao serao reposicionadas automaticamente."
+        }
+        return result + " A imagem fonte nao sera alterada."
+    }
+
+    private func beginWork(_ kind: Work?) -> UInt64 {
+        let version = versions.advance()
+        worker.invalidate(version)
+        work = kind
+        return version
+    }
+    private func accepts(_ version: UInt64) -> Bool { active && versions.accepts(version) }
+
+    func load(page: ScanPage, folder: URL) {
+        guard original == nil else { return }
+        active = true
+        self.folder = folder
+        original = page
+        draft = page
+        cropSnapshot = page
+        adjustments = EditorAdjustmentState(page.reconstructedAdjustments)
+        let version = beginWork(.loading)
+        worker.perform(revision: version, work: {
+            let data = try Data(contentsOf: folder.appendingPathComponent(page.sourceFile))
+            let source = ScanEngine.normalized(try ScanEngine.image(data), maximum: 1400)
+            var copy = page
+            let preview = try ScanEngine.recoveredPreview(source: source, page: &copy)
+            return (source, preview)
+        }, completion: { [weak self] result in
+            guard let self, self.accepts(version) else { return }
+            self.work = nil
+            switch result {
+            case .success(let images):
+                self.source = images.0; self.preview = images.1; self.previewReady = true
+            case .failure(let failure): self.error = failure.localizedDescription
+            }
+        })
+    }
+    func stop() {
+        active = false
+        _ = beginWork(nil)
+    }
+    private func invalidateText() {
+        draft?.lines = []
+        draft?.ocrWarning = nil
+        recognizedText = ""
+        previewReady = false
+    }
+    func refreshPreview(debounced: Bool = true) {
+        guard let source, let page = draft else { return }
+        previewReady = false
+        let version = beginWork(.preview)
+        worker.perform(revision: version, delay: debounced ? 0.22 : 0, work: {
+            var copy = page
+            return try ScanEngine.recoveredPreview(source: source, page: &copy)
+        }, completion: { [weak self] result in
+            guard let self, self.accepts(version) else { return }
+            self.work = nil
+            switch result {
+            case .success(let image): self.preview = image; self.previewReady = true
+            case .failure(let failure): self.error = failure.localizedDescription
+            }
+        })
+    }
+    func setFilter(_ filter: PageFilter) {
+        guard stage == .processed, !controlsBlocked, draft?.filter != filter else { return }
+        draft?.filter = filter
+        invalidateText()
+        refreshPreview()
+    }
+    func beginAdjustments() {
+        guard stage == .processed, !controlsBlocked, let page = draft else { return }
+        adjustmentSnapshot = page
+        adjustmentTextSnapshot = recognizedText
+        adjustments = EditorAdjustmentState(page.reconstructedAdjustments)
+        adjustments.begin()
+        stage = .adjustments
+        draft?.reconstructedAdjustments = adjustments.effective
+        invalidateText()
+        refreshPreview()
+    }
+    func selectAdjustment(_ control: EditorAdjustmentState.Control) { adjustments.selected = control }
+    func adjust(to value: Double) {
+        guard stage == .adjustments, !saving else { return }
+        adjustments.set(adjustments.selected, to: value)
+        draft?.reconstructedAdjustments = adjustments.effective
+        invalidateText()
+        refreshPreview()
+    }
+    func finishAdjustments(confirm: Bool) {
+        guard stage == .adjustments, !saving else { return }
+        if confirm {
+            adjustments.confirm()
+            draft?.reconstructedAdjustments = adjustments.effective
+            invalidateText()
+        } else {
+            adjustments.cancel()
+            if let snapshot = adjustmentSnapshot { draft = snapshot }
+            recognizedText = adjustmentTextSnapshot
+        }
+        adjustmentSnapshot = nil
+        adjustmentTextSnapshot = ""
+        stage = .processed
+        refreshPreview(debounced: false)
+    }
+    func requestGeometry(_ change: GeometryChange) {
+        guard !controlsBlocked else { return }
+        if hasOverlays || hasOCR { pendingGeometry = change }
+        else { applyGeometry(change) }
+    }
+    func confirmGeometry() {
+        guard let change = pendingGeometry else { return }
+        pendingGeometry = nil
+        applyGeometry(change)
+    }
+    private func applyGeometry(_ change: GeometryChange) {
+        switch change {
+        case .crop:
+            cropSnapshot = draft // BEFORE the explicitly approved overlay removal.
+            stage = .crop
+        case .unlockCrop:
+            if cropSnapshot == nil { cropSnapshot = draft }
+        default: break
+        }
+        if hasOverlays { draft?.overlays = [] }
+        invalidateText()
+        preview = nil
+        _ = beginWork(nil)
+        switch change {
+        case .rotate(let delta):
+            let updated = (turns + delta + 4) % 4
+            draft?.quarterTurns = updated
+            if stage != .crop { refreshPreview(debounced: false) }
+        case .detectBorders: detectBorders()
+        case .crop, .unlockCrop: break
+        }
+    }
+    func moveCorner(_ index: Int, to point: CGPoint) {
+        guard stage == .crop, !hasOverlays, !controlsBlocked else { return }
+        let changed = EditorGeometry.replacing(corners, index: index,
+            point: EditorGeometry.sourcePoint(point, quarterTurns: turns))
+        draft?.corners = changed
+        draft?.autoCrop = true
+        invalidateText()
+        _ = beginWork(nil)
+    }
+    private func detectBorders() {
+        guard let cg = source?.cgImage else { return }
+        let version = beginWork(.borders)
+        worker.perform(revision: version, work: { try ScanEngine.detectCorners(cg) }, completion: { [weak self] result in
+            guard let self, self.accepts(version) else { return }
+            self.work = nil
+            switch result {
+            case .success(let corners):
+                if let corners, EditorGeometry.isValid(corners) {
+                    self.draft?.corners = corners; self.draft?.autoCrop = true
+                    self.notice = "Bordas detectadas. Ajuste os cantos antes de avancar."
+                } else { self.notice = "Nenhuma borda confiavel. Ajuste os quatro cantos manualmente." }
+            case .failure(let failure): self.error = failure.localizedDescription
+            }
+        })
+    }
+    func processCrop() {
+        guard stage == .crop, !controlsBlocked else { return }
+        guard EditorGeometry.isValid(corners) else {
+            error = "Os cantos estao cruzados ou a area e muito pequena. Corrija o quadrilatero."
+            return
+        }
+        let selected = corners
+        draft?.corners = selected
+        draft?.autoCrop = true
+        cropSnapshot = nil
+        stage = .processed
+        invalidateText()
+        refreshPreview(debounced: false)
+    }
+    func cancelCrop() {
+        guard !controlsBlocked, let snapshot = cropSnapshot else { return }
+        draft = snapshot
+        adjustments = EditorAdjustmentState(snapshot.reconstructedAdjustments)
+        cropSnapshot = nil
+        stage = .processed
+        recognizedText = ""
+        refreshPreview(debounced: false)
+    }
+    func openOverlay(_ mode: EditorSheet) {
+        guard stage == .processed, previewReady, !controlsBlocked else { return }
+        sheet = mode
+    }
+    func addOverlays(_ overlays: [PageOverlay]) {
+        guard !overlays.isEmpty, stage == .processed, !saving else { return }
+        let combined = (draft?.overlays ?? []) + overlays
+        draft?.overlays = combined
+        invalidateText()
+        // Do not keep showing the old unredacted preview during the new render.
+        preview = nil
+        refreshPreview(debounced: false)
+    }
+    func recognize() {
+        guard stage == .processed, previewReady, !controlsBlocked, let folder, let page = draft else { return }
+        recognizedText = ""
+        sheet = .ocr
+        let version = beginWork(.ocr)
+        worker.perform(revision: version, work: {
+            // OCR uses the full working image, not the 1400px interactive preview.
+            let source = try ScanEngine.image(Data(contentsOf: folder.appendingPathComponent(page.sourceFile)))
+            var copy = page
+            let rendered = try ScanEngine.recoveredPreview(source: source, page: &copy)
+            let lines = try ScanEngine.recognize(rendered)
+            return EditorGeometry.visibleOCR(lines, overlays: page.overlays ?? [])
+        }, completion: { [weak self] result in
+            guard let self, self.accepts(version) else { return }
+            self.work = nil
+            switch result {
+            case .success(let lines):
+                self.draft?.lines = lines
+                self.recognizedText = lines.map(\.text).joined(separator: "\n")
+            case .failure(let failure):
+                self.sheet = nil; self.error = failure.localizedDescription
+            }
+        })
+    }
 }
 
 struct RecoveredPageEditor: View {
+    typealias Contract = RecoveredEditorToolbarContract
     @EnvironmentObject private var store: DocumentStore
+    @Environment(\.dismiss) private var dismiss
     let documentID: UUID
     let pageID: UUID
-    @State private var source: UIImage?
-    @State private var preview: UIImage?
-    @State private var corners = [CropVertex(id: 0, x: 0, y: 1), CropVertex(id: 1, x: 1, y: 1),
-                                  CropVertex(id: 2, x: 1, y: 0), CropVertex(id: 3, x: 0, y: 0)]
-    @State private var rotation = 0
-    @State private var brightness = 0.0
-    @State private var contrast = 0.0
-    @State private var detail = 100.0
-    @State private var adjustmentsEnabled = false
-    @State private var cropEnabled = false
-    @State private var busy = false
-    @State private var errorText: String?
-    @State private var notice: String?
+    @StateObject private var model = EditorViewModel()
+    @State private var discardRequested = false
+    @State private var deleteRequested = false
 
-    private var document: ScanDocument? { store.documents.first { $0.id == documentID } }
-    private var page: ScanPage? { document?.pages.first { $0.id == pageID } }
-    private var folder: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Folha").appendingPathComponent(documentID.uuidString)
+    private var layout: Contract.Layout {
+        switch model.stage {
+        case .crop: return .crop
+        case .processed: return .processed
+        case .adjustments: return .adjustments
+        }
     }
-
+    private var selectedOperations: Set<Contract.Operation> {
+        guard model.stage == .adjustments else { return [] }
+        switch model.adjustments.selected {
+        case .contrast: return [.contrast]
+        case .brightness: return [.brightness]
+        case .detail: return [.detail]
+        }
+    }
+    private var unavailableOperations: Set<Contract.Operation> {
+        guard !model.previewReady else { return [] }
+        var result: Set<Contract.Operation> = [.textWatermark, .annotation, .signature, .smudgeEditor, .recognizeText]
+        if model.stage != .adjustments { result.insert(.done) }
+        return result
+    }
     var body: some View {
-        ScrollView {
-            VStack(spacing: 18) {
-                if let source {
-                    Text("Arraste os quatro cantos sobre a imagem original.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                    cropCanvas(source)
-                    Toggle("Aplicar recorte manual", isOn: $cropEnabled)
-                    HStack {
-                        Button("Girar 90 graus", systemImage: "rotate.right") { rotation = (rotation + 1) % 4 }
-                        Spacer()
-                        Text("\(rotation * 90) graus").font(.caption.monospacedDigit())
-                    }
-                    Divider()
-                    Toggle("Ajustes reconstruidos", isOn: $adjustmentsEnabled)
-                    VStack(spacing: 12) {
-                        adjustment("Brilho", value: $brightness, range: -50...50)
-                        adjustment("Contraste", value: $contrast, range: -50...50)
-                        adjustment("Detalhe / fundo", value: $detail, range: 0...100)
-                    }.disabled(!adjustmentsEnabled)
-                    Text("Ajustes de pixels reconstruidos do comportamento observado. Recorte e perspectiva ainda usam uma implementacao independente.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Button("Previa") { process(save: false) }.buttonStyle(.bordered)
-                        Button("Aplicar e salvar") { process(save: true) }.buttonStyle(.borderedProminent)
-                    }
-                    if let preview {
-                        Image(uiImage: preview).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 12))
-                    }
-                    if let notice { Text(notice).font(.footnote).foregroundStyle(.secondary) }
-                } else { ProgressView("Abrindo imagem original...") }
+        VStack(spacing: 0) {
+            stageHeader
+            imageArea
+            if let notice = model.notice {
+                Text(notice).font(.caption).foregroundStyle(.white.opacity(0.8)).padding(8)
             }
-            .padding()
         }
-        .navigationTitle("Editar pagina")
+        .background(Color(white: 0.07))
+        .accessibilityIdentifier("editor.screen")
+        .navigationTitle(model.stage == .crop ? "Recortar pagina" : "Editar pagina")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationBarBackButtonHidden(busy)
-        .disabled(busy)
-        .overlay { if busy { ProgressView("Processando...").padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)) } }
-        .task { load() }
-        .alert("Atencao", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
-            Button("OK", role: .cancel) { errorText = nil }
-        } message: { Text(errorText ?? "") }
-    }
-
-    private func adjustment(_ title: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
-        VStack {
-            HStack { Text(title); Spacer(); Text("\(Int(value.wrappedValue))").monospacedDigit() }
-            Slider(value: value, in: range, step: 1)
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Cancelar") {
+                    if model.hasChanges { discardRequested = true } else { dismiss() }
+                }.disabled(model.saving).accessibilityIdentifier("editor.cancel")
+            }
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                if model.stage == .processed {
+                    Button { model.requestGeometry(.crop) } label: { Image(systemName: "crop") }
+                        .accessibilityLabel("Recortar").accessibilityIdentifier("editor.crop")
+                        .disabled(model.controlsBlocked || store.isBusy)
+                    Button { model.beginAdjustments() } label: { Image(systemName: "slider.horizontal.3") }
+                        .accessibilityLabel("Ajustes").accessibilityIdentifier("editor.adjustments")
+                        .disabled(model.controlsBlocked || store.isBusy)
+                }
+            }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                if model.stage == .processed { filterStrip }
+                if model.stage == .adjustments { adjustmentPanel }
+                Divider()
+                EditorNativeToolbar(layout: layout,
+                    enabled: !model.controlsBlocked && !store.isBusy && model.source != nil,
+                    selected: selectedOperations, disabledOperations: unavailableOperations,
+                    onOperation: handle)
+                    .frame(height: 50)
+            }.background(Color(uiColor: .secondarySystemBackground))
+        }
+        .tint(.green)
+        .disabled(model.saving)
+        .interactiveDismissDisabled(model.saving || model.hasChanges)
+        .task {
+            guard let document = store.document(documentID),
+                  let page = document.pages.first(where: { $0.id == pageID }) else {
+                model.error = "Documento ou pagina nao existe mais. Nenhuma nova pagina foi criada."
+                return
+            }
+            model.load(page: page, folder: store.root.appendingPathComponent(documentID.uuidString))
+        }
+        .onDisappear { model.stop() }
+        .onChange(of: store.isBusy) { busy in
+            if !busy && model.saving {
+                // Store clears isBusy before publishing its reload/completion.
+                DispatchQueue.main.async { finishSave() }
+            }
+        }
+        .sheet(item: $model.sheet) { sheet in
+            if sheet == .ocr {
+                EditorOCRTranscript(text: model.recognizedText, busy: model.work == .ocr)
+            } else if let image = model.preview {
+                EditorOverlayComposer(mode: sheet, image: image, onCommit: model.addOverlays)
+            }
+        }
+        .alert("Nao foi possivel concluir", isPresented: Binding(
+            get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
+                Button("OK", role: .cancel) { model.error = nil }
+            } message: { Text(model.error ?? "") }
+        .confirmationDialog("Reprocessar geometria?", isPresented: Binding(
+            get: { model.pendingGeometry != nil }, set: { if !$0 { model.pendingGeometry = nil } }), titleVisibility: .visible) {
+                Button(model.hasOverlays ? "Remover marcacoes e continuar" : "Reprocessar",
+                       role: model.hasOverlays ? .destructive : nil) { model.confirmGeometry() }
+                Button("Cancelar", role: .cancel) { model.pendingGeometry = nil }
+            } message: { Text(model.geometryWarning) }
+        .confirmationDialog("Descartar alteracoes desta pagina?", isPresented: $discardRequested, titleVisibility: .visible) {
+            Button("Descartar e sair", role: .destructive) { dismiss() }
+            Button("Continuar editando", role: .cancel) {}
+        } message: { Text("O documento salvo e a imagem fonte nao serao modificados.") }
+        .confirmationDialog("Remover esta pagina do documento?", isPresented: $deleteRequested, titleVisibility: .visible) {
+            Button("Remover pagina", role: .destructive) { deletePage() }
+            Button("Cancelar", role: .cancel) {}
+        } message: { Text("As alteracoes deste editor serao descartadas. A fonte e preservada pelo armazenamento.") }
     }
-
-    private func cropCanvas(_ image: UIImage) -> some View {
+    private var stageHeader: some View {
+        HStack {
+            Text(model.stage == .crop ? "1  RECORTE" : model.stage == .adjustments ? "AJUSTES" : "2  PREVIA")
+                .font(.caption.weight(.semibold)).tracking(1.5)
+            Spacer()
+            if model.saving { ProgressView().tint(.green); Text("Salvando...").font(.caption) }
+            else if model.work != nil { ProgressView().tint(.green); Text("Processando...").font(.caption) }
+            else { Text("No dispositivo").font(.caption) }
+        }.foregroundStyle(.white.opacity(0.8)).padding(.horizontal, 16).padding(.vertical, 12)
+    }
+    private var imageArea: some View {
         GeometryReader { geometry in
-            ZStack {
-                Image(uiImage: image).resizable().scaledToFill()
-                Path { path in
-                    for (index, corner) in corners.enumerated() {
-                        let point = CGPoint(x: corner.x * geometry.size.width, y: (1 - corner.y) * geometry.size.height)
-                        if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            if model.stage == .crop, let source = model.source {
+                let oriented = model.turns % 2 == 0 ? source.size : CGSize(width: source.size.height, height: source.size.width)
+                let size = EditorGeometry.fittedSize(oriented,
+                    inside: CGSize(width: max(1, geometry.size.width - 24), height: max(1, geometry.size.height - 100)))
+                VStack(spacing: 12) {
+                    Text(model.hasOverlays ? "Marcacoes existentes: libere o recorte para mover os cantos." : "Arraste os quatro cantos. Avancar aplica a perspectiva.")
+                        .font(.caption).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center)
+                    cropCanvas(source, size: size)
+                    HStack {
+                        Button("Cancelar recorte") { model.cancelCrop() }
+                            .accessibilityIdentifier("editor.cancel-crop")
+                        if model.hasOverlays {
+                            Button("Liberar recorte") { model.requestGeometry(.unlockCrop) }
+                                .accessibilityIdentifier("editor.unlock-crop")
+                        }
+                    }.font(.caption).disabled(model.controlsBlocked)
+                }.frame(width: geometry.size.width, height: geometry.size.height)
+            } else if let preview = model.preview {
+                Image(uiImage: preview).resizable().scaledToFit().padding(12)
+                    .opacity(model.previewReady ? 1 : 0.45)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .accessibilityLabel(model.previewReady ? "Previa da pagina" : "Previa sendo atualizada")
+                    .accessibilityIdentifier("editor.preview")
+            } else {
+                VStack(spacing: 12) {
+                    if model.work != nil { ProgressView().tint(.green) }
+                    Text(model.work != nil ? "Preparando imagem..." : "Previa indisponivel")
+                        .font(.footnote).foregroundStyle(.white.opacity(0.8))
+                    if model.work == nil && model.source != nil {
+                        Button("Tentar previa novamente") { model.refreshPreview(debounced: false) }
                     }
-                    path.closeSubpath()
-                }.stroke(.green, lineWidth: 2)
-                ForEach(corners) { corner in
-                    Circle().fill(.green).overlay(Circle().stroke(.white, lineWidth: 2))
-                        .frame(width: 26, height: 26)
-                        .position(x: corner.x * geometry.size.width, y: (1 - corner.y) * geometry.size.height)
-                        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("crop"))
-                            .onChanged { value in
-                                guard geometry.size.width > 0, geometry.size.height > 0 else { return }
-                                corners[corner.id].x = min(1, max(0, value.location.x / geometry.size.width))
-                                corners[corner.id].y = 1 - min(1, max(0, value.location.y / geometry.size.height))
-                                cropEnabled = true
-                            })
+                }.frame(width: geometry.size.width, height: geometry.size.height)
+            }
+        }
+    }
+    private func cropCanvas(_ image: UIImage, size: CGSize) -> some View {
+        let points = EditorGeometry.vertices(model.corners)
+        return ZStack {
+            Image(uiImage: image).resizable()
+                .frame(width: model.turns % 2 == 0 ? size.width : size.height,
+                       height: model.turns % 2 == 0 ? size.height : size.width)
+                .rotationEffect(.degrees(Double(model.turns) * 90))
+            Path { path in
+                for (index, corner) in points.enumerated() {
+                    let unit = EditorGeometry.displayPoint(corner, quarterTurns: model.turns)
+                    let point = CGPoint(x: unit.x * size.width, y: unit.y * size.height)
+                    if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
                 }
-            }.coordinateSpace(name: "crop").clipped()
+                path.closeSubpath()
+            }.stroke(EditorGeometry.isValid(model.corners) ? Color.green : Color.red, lineWidth: 2)
+            ForEach(0..<4, id: \.self) { index in
+                let point = EditorGeometry.displayPoint(points[index], quarterTurns: model.turns)
+                Circle().fill(Color.green).frame(width: 18, height: 18)
+                    .overlay(Circle().stroke(Color.white, lineWidth: 2))
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
+                    .position(x: point.x * size.width, y: point.y * size.height)
+                    .accessibilityLabel("Canto \(index + 1)")
+                    .accessibilityIdentifier("editor.crop.corner.\(index)")
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("editor-crop"))
+                        .onChanged { value in
+                            guard size.width > 0, size.height > 0 else { return }
+                            model.moveCorner(index, to: CGPoint(x: value.location.x / size.width, y: value.location.y / size.height))
+                        })
+            }
         }
-        .aspectRatio(image.size.width / max(1, image.size.height), contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .frame(width: size.width, height: size.height)
+        .coordinateSpace(name: "editor-crop")
+        .accessibilityIdentifier("editor.crop")
     }
-
-    private func load() {
-        guard let page else { errorText = "Pagina nao encontrada."; return }
-        do {
-            let data = try Data(contentsOf: folder.appendingPathComponent(page.sourceFile))
-            guard let image = UIImage(data: data) else { throw ScanFailure.message("Original ilegivel.") }
-            let format = UIGraphicsImageRendererFormat(); format.scale = 1
-            source = UIGraphicsImageRenderer(size: image.size, format: format).image { _ in image.draw(at: .zero) }
-            rotation = page.quarterTurns
-            cropEnabled = page.autoCrop
-            if let c = page.corners {
-                corners = [CropVertex(id: 0, x: c.topLeft.x, y: c.topLeft.y),
-                           CropVertex(id: 1, x: c.topRight.x, y: c.topRight.y),
-                           CropVertex(id: 2, x: c.bottomRight.x, y: c.bottomRight.y),
-                           CropVertex(id: 3, x: c.bottomLeft.x, y: c.bottomLeft.y)]
+    private var filterStrip: some View {
+        VStack(spacing: 3) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(EditorFilterCatalog.recoveredOrder) { filter in filterButton(filter) }
+                    Divider().frame(height: 34)
+                    filterButton(.removeShadow)
+                }.padding(.horizontal, 12).padding(.vertical, 10)
+            }.accessibilityIdentifier("editor.filters")
+            if model.draft?.filter == .removeShadow {
+                Text("* Remocao de sombra independente; nao e o motor original.")
+                    .font(.caption2).foregroundStyle(.secondary).padding(.bottom, 5)
             }
-            if let adjustment = page.reconstructedAdjustments {
-                adjustmentsEnabled = true
-                brightness = Double(adjustment.brightness); contrast = Double(adjustment.contrast)
-                detail = Double(adjustment.detail)
-            }
-            preview = UIImage(contentsOfFile: folder.appendingPathComponent(page.renderedFile).path)
-        } catch { errorText = error.localizedDescription }
+        }.disabled(model.controlsBlocked || store.isBusy)
     }
-
-    private func process(save: Bool) {
-        guard let source, let originalPage = page, !busy else { return }
-        if cropEnabled && !validPolygon() { errorText = "Os cantos estao cruzados ou formam uma area muito pequena."; return }
-        do {
-            let encoded = try JSONEncoder().encode(originalPage)
-            var fields = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
-            fields["quarterTurns"] = rotation
-            fields["autoCrop"] = cropEnabled
-            fields["corners"] = cropEnabled ? ["topLeft": corners[0].json, "topRight": corners[1].json,
-                "bottomRight": corners[2].json, "bottomLeft": corners[3].json] as Any : NSNull()
-            let setting = ReconstructedAdjustmentContract(brightness: Int32(brightness), contrast: Int32(contrast), detail: Int32(detail))
-            fields["reconstructedAdjustments"] = adjustmentsEnabled
-                ? ["brightness": setting.brightness, "contrast": setting.contrast, "detail": setting.detail] as Any : NSNull()
-            // The recovered adjustment replaces generic enhancement for this edit.
-            fields["filter"] = "natural"
-            let updated = try JSONDecoder().decode(ScanPage.self, from: JSONSerialization.data(withJSONObject: fields))
-            let destination = folder
-            busy = true; notice = nil
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    var page = updated
-                    let result = try ScanEngine.recoveredPreview(source: source, page: &page)
-                    if save { try RecoveredPagePersistence.save(page: page, image: result, original: originalPage, folder: destination) }
-                    DispatchQueue.main.async {
-                        preview = result; busy = false
-                        if save { store.reload(); notice = "Pagina salva; original preservado." }
-                    }
-                } catch { DispatchQueue.main.async { busy = false; errorText = error.localizedDescription } }
+    private func filterButton(_ filter: PageFilter) -> some View {
+        let selected = model.draft?.filter == filter
+        return Button { model.setFilter(filter) } label: {
+            VStack(spacing: 5) {
+                Image(systemName: filter == .natural ? "photo" : "circle.lefthalf.filled")
+                    .font(.system(size: 21)).frame(height: 26)
+                Text(EditorFilterCatalog.title(filter)).font(.caption2)
             }
-        } catch { errorText = error.localizedDescription }
-    }
-
-    private func validPolygon() -> Bool {
-        var crosses = [Double]()
-        var area = 0.0
-        for i in 0..<4 {
-            let a = corners[i], b = corners[(i + 1) % 4], c = corners[(i + 2) % 4]
-            crosses.append((b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x))
-            area += a.x * b.y - b.x * a.y
+            .frame(minWidth: 58).padding(.vertical, 5)
+            .foregroundStyle(selected ? Color.green : Color.primary)
+            .background(selected ? Color.green.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
         }
-        return abs(area) > 0.002 && (crosses.allSatisfy { $0 > 0.000001 } || crosses.allSatisfy { $0 < -0.000001 })
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("editor.filter.\(EditorFilterCatalog.nativeModeID(filter))")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
-}
-
-private enum RecoveredPagePersistence {
-    static func save(page: ScanPage, image: UIImage, original: ScanPage, folder: URL) throws {
-        let manifest = folder.appendingPathComponent(ScanEngine.recoveredManifestName)
-        let before = try Data(contentsOf: manifest)
-        var document = try JSONSerialization.jsonObject(with: before) as! [String: Any]
-        guard var pages = document["pages"] as? [[String: Any]],
-              let index = pages.firstIndex(where: { ($0["id"] as? String)?.lowercased() == page.id.uuidString.lowercased() }),
-              pages[index]["renderedFile"] as? String == original.renderedFile else {
-            throw ScanFailure.message("A pagina mudou. Reabra antes de salvar.")
+    private var adjustmentPanel: some View {
+        let control = model.adjustments.selected
+        let title = control == .contrast ? "Contraste" : control == .brightness ? "Brilho" : "Detalhe"
+        return VStack(spacing: 4) {
+            HStack { Text(title); Spacer(); Text("\(Int(model.adjustments.value(control)))").monospacedDigit() }
+                .font(.caption)
+            Slider(value: Binding(get: { model.adjustments.value(control) }, set: { model.adjust(to: $0) }),
+                   in: EditorAdjustmentState.range(control), step: 1)
+                .accessibilityLabel(title).accessibilityIdentifier("editor.adjustment.slider")
+        }.padding(.horizontal, 20).padding(.vertical, 10).accessibilityIdentifier("editor.adjustments")
+    }
+    private func handle(_ operation: Contract.Operation) {
+        guard !model.controlsBlocked && !store.isBusy else { return }
+        let plan = Contract.plan(operation, nativeStatus: model.stage.rawValue, zoomScale: 1,
+                                 pageContainsOCR: model.hasOCR)
+        switch plan.intent {
+        case .deletePage: deleteRequested = true
+        case .detectBorders: model.requestGeometry(.detectBorders)
+        case .rotateLeft, .rotateProcessedPage: model.requestGeometry(.rotate(-1))
+        case .rotateRight: model.requestGeometry(.rotate(1))
+        case .clearOCRAndProcessCrop: model.processCrop()
+        case .recognizeText: model.recognize()
+        case .showAdjustments: model.beginAdjustments()
+        case .confirmAdjustments: model.finishAdjustments(confirm: true)
+        case .cancelAdjustments: model.finishAdjustments(confirm: false)
+        case .savePage: save()
+        case .showSignature: model.openOverlay(.signature)
+        case .showTextWatermark: model.openOverlay(.text)
+        case .smudgePage: model.openOverlay(.redaction)
+        case .enterInkNote(let mode): model.openOverlay(mode == 1 ? .redaction : .annotation)
+        case .selectAdjustment(let operation):
+            model.selectAdjustment(operation == .detail ? .detail : operation == .brightness ? .brightness : .contrast)
+        case .retakePhoto, .continueCapture, .addCapture:
+            // Unreachable: no pageList/referenceMode 10. Capture belongs to the document screen.
+            break
+        case .noAction: break
         }
-        let revision = UUID().uuidString
-        let rendered = "\(page.id.uuidString)-\(revision).png"
-        let thumbnail = "\(page.id.uuidString)-\(revision)-thumb.png"
-        guard let pixels = image.pngData() else { throw ScanFailure.message("Falha ao salvar os pixels.") }
-        try pixels.write(to: folder.appendingPathComponent(rendered), options: .atomic)
-        let scale = min(1, 320 / max(image.size.width, image.size.height))
-        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-        let format = UIGraphicsImageRendererFormat(); format.scale = 1
-        let thumb = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
-        guard let thumbData = thumb.pngData() else { throw ScanFailure.message("Falha na miniatura.") }
-        try thumbData.write(to: folder.appendingPathComponent(thumbnail), options: .atomic)
-        var fields = try JSONSerialization.jsonObject(with: JSONEncoder().encode(page)) as! [String: Any]
-        fields["renderedFile"] = rendered; fields["thumbnailFile"] = thumbnail
-        fields["width"] = image.cgImage?.width ?? Int(image.size.width)
-        fields["height"] = image.cgImage?.height ?? Int(image.size.height)
-        fields["lines"] = []
-        do {
-            if let cg = image.cgImage {
-                let request = VNRecognizeTextRequest()
-                request.recognitionLevel = .accurate; request.usesLanguageCorrection = true
-                let supported = try request.supportedRecognitionLanguages()
-                request.recognitionLanguages = ["pt-BR", "en-US"].filter { supported.contains($0) }
-                request.automaticallyDetectsLanguage = true
-                try VNImageRequestHandler(cgImage: cg).perform([request])
-                fields["lines"] = (request.results ?? []).compactMap { result -> [String: Any]? in
-                    guard let text = result.topCandidates(1).first else { return nil }
-                    let b = result.boundingBox
-                    return ["id": UUID().uuidString, "text": text.string, "confidence": text.confidence,
-                            "x": b.minX, "y": b.minY, "width": b.width, "height": b.height]
-                }
-                fields["ocrWarning"] = NSNull()
-            }
-        } catch { fields["ocrWarning"] = error.localizedDescription }
-        pages[index].merge(fields) { _, new in new }
-        document["pages"] = pages
-        document["updatedAt"] = ISO8601DateFormatter().string(from: Date())
-        guard try Data(contentsOf: manifest) == before else { throw ScanFailure.message("O documento mudou durante a edicao.") }
-        let data = try JSONSerialization.data(withJSONObject: document, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: manifest, options: .atomic)
+    }
+    private func save() {
+        guard model.stage == .processed, model.previewReady, !store.isBusy, !model.saving,
+              let draft = model.draft, let original = model.original,
+              let document = store.document(documentID),
+              let current = document.pages.first(where: { $0.id == pageID }) else { return }
+        guard draft.id == pageID, current == original, draft.sourceFile == original.sourceFile else {
+            model.error = "A pagina mudou fora deste editor. Saia e reabra antes de salvar; nada foi sobrescrito."
+            return
+        }
+        model.saving = true
+        // Store owns persistence and OCR. This editor never writes images or manifests.
+        store.revise(document: document, page: draft)
+    }
+    private func finishSave() {
+        guard model.saving, !store.isBusy else { return }
+        model.saving = false
+        if let error = store.error { model.error = error; return }
+        guard let saved = store.document(documentID)?.pages.first(where: { $0.id == pageID }),
+              saved.sourceFile == model.original?.sourceFile,
+              saved.renderedFile != model.original?.renderedFile else {
+            model.error = "O armazenamento nao confirmou uma nova revisao. Reabra o documento antes de tentar novamente."
+            return
+        }
+        dismiss()
+    }
+    private func deletePage() {
+        guard !store.isBusy, let document = store.document(documentID),
+              let index = document.pages.firstIndex(where: { $0.id == pageID }),
+              document.pages[index] == model.original else {
+            model.error = "A pagina mudou; a remocao foi cancelada."
+            return
+        }
+        store.removePages(document, at: IndexSet(integer: index))
+        if store.document(documentID)?.pages.contains(where: { $0.id == pageID }) == false { dismiss() }
+        else { model.error = store.error ?? "O armazenamento nao confirmou a remocao." }
     }
 }

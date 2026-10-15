@@ -15,13 +15,33 @@ enum ScanConfiguration {
 
 enum PageFilter: String, Codable, CaseIterable, Identifiable {
     case natural, clean, grayscale, document
+    case lighten, blackAndWhite2, removeShadow
     var id: String { rawValue }
+    // Recovered selector IDs/order, not evidence of identical native processing.
+    static var recoveredOrder: [PageFilter] = [.natural, .lighten, .clean, .document, .blackAndWhite2, .grayscale]
+    var nativeModeID: Int {
+        switch self {
+        case .natural: return 0
+        case .lighten: return 1
+        case .clean: return 2
+        case .document: return 5
+        case .blackAndWhite2: return 3
+        case .grayscale: return 4
+        case .removeShadow: return 6
+        }
+    }
+    var implementationNote: String {
+        "Implementacao independente aproximada; nao e processamento nativo identico ao CamScanner."
+    }
     var title: String {
         switch self {
         case .natural: return "Original"
-        case .clean: return "Nitido"
+        case .clean: return "Cor magica"
         case .grayscale: return "Cinza"
-        case .document: return "Documento"
+        case .document: return "P&B"
+        case .lighten: return "Clarear"
+        case .blackAndWhite2: return "P&B 2"
+        case .removeShadow: return "Remover sombras"
         }
     }
 }
@@ -41,6 +61,22 @@ struct PageCorners: Codable, Hashable {
     var bottomRight: UnitPointRecord
 }
 
+enum PageOverlayKind: String, Codable { case text, ink, redaction }
+
+struct PageOverlay: Codable, Hashable, Identifiable {
+    // Normalized top-left coordinates on the final cropped/rotated page.
+    // These are deliberately NOT the bottom-left coordinates used by Vision.
+    var id = UUID()
+    var kind: PageOverlayKind
+    var text: String? = nil
+    var points: [UnitPointRecord] = []
+    var x: Double = 0.1
+    var y: Double = 0.1
+    var width: Double = 0.5
+    var height: Double = 0.15
+    var lineWidth: Double = 0.006
+}
+
 struct OCRLine: Codable, Hashable, Identifiable {
     var id = UUID()
     var text: String
@@ -54,6 +90,8 @@ struct OCRLine: Codable, Hashable, Identifiable {
 
 struct ScanPage: Codable, Hashable, Identifiable {
     var reconstructedAdjustments: ReconstructedAdjustmentContract? = nil
+    // Optional for manifests written before overlays were introduced.
+    var overlays: [PageOverlay]? = nil
     var id: UUID
     var sourceFile: String
     var renderedFile: String
@@ -79,12 +117,13 @@ struct ScanDocument: Codable, Hashable, Identifiable {
 
 enum ScanInput {
     case camera(UIImage)
+    case rawCamera(UIImage)
     case photo(Data)
 
     func bytes() throws -> Data {
         switch self {
         case .photo(let data): return data
-        case .camera(let image):
+        case .camera(let image), .rawCamera(let image):
             guard let data = image.jpegData(compressionQuality: ScanConfiguration.cameraJPEGQuality) else {
                 throw ScanFailure.message("Nao foi possivel guardar a imagem capturada.")
             }
@@ -95,7 +134,7 @@ enum ScanInput {
     var autoCrop: Bool {
         switch self {
         case .camera: return false // VisionKit has already offered crop correction.
-        case .photo: return true
+        case .photo, .rawCamera: return true
         }
     }
 }
