@@ -130,7 +130,7 @@ void REAUpdateViewer(UIViewController *vc) {
             UIViewController *strongVC = weakVC;
             REAInvokeNativeObjectAction(strongVC, selector, findOriginalSender(strongVC, selector));
         }];
-    own = [[UIBarButtonItem alloc] initWithTitle:@"Editar" image:nil primaryAction:action menu:nil];
+    own = [[UIBarButtonItem alloc] initWithPrimaryAction:action menu:nil];
     own.accessibilityIdentifier = editIdentifier;
     own.accessibilityLabel = @"Editar página atual";
     own.enabled = senderEnabled(sender);
