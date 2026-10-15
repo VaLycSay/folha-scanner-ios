@@ -1,0 +1,53 @@
+name: Nuvio baseline comparison
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/nuvio-ios-0.5.10-r1]
+    paths: [.github/workflows/nuvio-validation.yml]
+permissions:
+  contents: read
+jobs:
+  compare:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [official, modified]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Obtain the same pinned official source
+        run: |
+          python3 harness/nuvio/fetch-source.py upstream
+          touch upstream/local.properties
+      - name: Apply modifications only to comparison candidate
+        if: matrix.variant == 'modified'
+        run: |
+          node harness/nuvio/apply-upgrades.mjs upstream reports
+          cp harness/nuvio/TimelineTouchRegressionTest.kt upstream/composeApp/src/androidHostTest/kotlin/com/nuvio/app/features/player/
+      - name: Run complete shared and Compose UI suite
+        working-directory: upstream
+        env:
+          ORG_GRADLE_PROJECT_org.gradle.jvmargs: -Xmx4096M -Dfile.encoding=UTF-8
+          ORG_GRADLE_PROJECT_kotlin.daemon.jvmargs: -Xmx2048M
+        run: ./gradlew :composeApp:testAndroidHostTest -Pnuvio.android.distribution=full -Pnuvio.ios.distribution=appstore --stacktrace
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nuvio-comparison-${{ matrix.variant }}
+          path: |
+            upstream/composeApp/build/test-results/
+            upstream/composeApp/build/reports/tests/
+            reports/
+          retention-days: 7

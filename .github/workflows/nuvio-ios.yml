@@ -13,6 +13,7 @@ env:
   UPSTREAM_SHA: 6d435785c0e082ae3d4fbb8152e1ff5e45c2e575
 jobs:
   compose-regressions:
+    if: ${{ !contains(github.event.head_commit.message, '[validation-only]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -28,7 +29,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
       - uses: gradle/actions/setup-gradle@v4
       - name: Apply compatible improvements
         run: |
@@ -52,6 +53,7 @@ jobs:
             upstream/composeApp/build/reports/tests/
           retention-days: 7
   ios-build:
+    if: ${{ !contains(github.event.head_commit.message, '[validation-only]') }}
     runs-on: macos-26
     timeout-minutes: 120
     env:
