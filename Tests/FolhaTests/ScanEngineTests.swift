@@ -19,7 +19,7 @@ final class ScanEngineTests: XCTestCase {
         return UIGraphicsImageRenderer(size: CGSize(width: 900, height: 1200), format: format).image { ctx in
             UIColor.white.setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: 900, height: 1200))
-            (label as NSString).draw(in: CGRect(x: 60, y: 100, width: 780, height: 130), attributes: [
+            (label as NSString).draw(in: CGRect(x: 60, y: 100, width: 780, height: 130), withAttributes: [
                 .font: UIFont.systemFont(ofSize: 64, weight: .medium),
                 .foregroundColor: UIColor.black
             ])
