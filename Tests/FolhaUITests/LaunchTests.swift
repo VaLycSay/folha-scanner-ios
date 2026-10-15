@@ -135,7 +135,11 @@ final class LaunchTests: XCTestCase {
         // the caret before REA; explicitly move to the trailing interior first.
         field.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap()
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: original.count + 1))
-        XCTAssertEqual(field.value as? String, "", "The complete original title must be removed before renaming.")
+        let clearedValue = try XCTUnwrap(field.value as? String)
+        // Native UITextField accessibility returns its placeholder when empty.
+        // The exact new value assertion below still rejects leftover text.
+        XCTAssertTrue(clearedValue.isEmpty || clearedValue == field.placeholderValue,
+                      "The complete original title must be removed before renaming.")
         field.typeText(renamed)
         XCTAssertEqual(field.value as? String, renamed)
         let alert = app.alerts.firstMatch
