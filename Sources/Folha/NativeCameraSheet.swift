@@ -36,11 +36,20 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
     private var ended = false
     private var flashOn = false
     private var mode = NativeScanConfiguration.CameraMode.singlePage
-    private let shutter = UIButton(type: .system)
+    private let shutter = CameraShutterButton(frame: .zero)
     private let finish = UIButton(type: .system)
     private let status = UILabel()
-    private let modes = UISegmentedControl(items: ["Unica", "Lote", "Texto", "QR"])
+    private let modes = UISegmentedControl(items: ["Digitalizar", "Texto", "QR"])
+    private let pageModes = UISegmentedControl(items: ["\u{00DA}nico", "Lote"])
+    private let previewContainer = UIView()
+    private let gridOverlay = UIView()
+    private let gridLines = CAShapeLayer()
     private let panel = UIView()
+    private let modeStrip = UIView()
+    private let modeMarker = UIView()
+    private let captureThumbnail = UIImageView()
+    private let captureCount = UILabel()
+    private let accent = UIColor(red: 0.12, green: 0.78, blue: 0.65, alpha: 1)
     private let qrText = UITextView()
     private let copyQR = UIButton(type: .system)
 
@@ -48,9 +57,13 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        previewContainer.backgroundColor = .black
+        previewContainer.clipsToBounds = true
+        previewContainer.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(previewContainer)
         let layer = AVCaptureVideoPreviewLayer(session: session)
         layer.videoGravity = .resizeAspectFill
-        view.layer.addSublayer(layer)
+        previewContainer.layer.addSublayer(layer)
         preview = layer
         configureControls()
         NotificationCenter.default.addObserver(self, selector: #selector(interrupted), name: .AVCaptureSessionWasInterrupted, object: session)
@@ -69,48 +82,132 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
     }
 
     private func configureControls() {
-        panel.backgroundColor = UIColor.black.withAlphaComponent(0.86)
+        view.tintColor = .white
+        panel.backgroundColor = .black
         panel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(panel)
         let close = UIButton(type: .system)
-        close.setTitle("Cancelar", for: .normal)
+        close.setImage(UIImage(systemName: "xmark"), for: .normal)
+        close.accessibilityLabel = "Cancelar captura"
+        close.accessibilityIdentifier = "camera.cancel"
         close.addTarget(self, action: #selector(cancelCapture), for: .touchUpInside)
         let flash = UIButton(type: .system)
         flash.setImage(UIImage(systemName: "bolt.slash"), for: .normal)
         flash.accessibilityLabel = "Alternar flash"
+        flash.accessibilityValue = "Desativado"
+        flash.accessibilityIdentifier = "camera.flash"
         flash.addTarget(self, action: #selector(toggleFlash(_:)), for: .touchUpInside)
-        let header = UIStackView(arrangedSubviews: [close, UIView(), flash])
+        let grid = UIButton(type: .system)
+        grid.setImage(UIImage(systemName: "grid"), for: .normal)
+        grid.isSelected = true
+        grid.tintColor = accent
+        grid.accessibilityLabel = "Grade de enquadramento"
+        grid.accessibilityValue = "Ativada"
+        grid.accessibilityIdentifier = "camera.grid"
+        grid.addTarget(self, action: #selector(toggleGrid(_:)), for: .touchUpInside)
+        for button in [close, flash, grid] {
+            button.setPreferredSymbolConfiguration(UIImage.SymbolConfiguration(pointSize: 20, weight: .regular), forImageIn: .normal)
+            button.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        }
+        let header = UIStackView(arrangedSubviews: [close, UIView(), flash, grid])
+        header.spacing = 10
         header.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(header)
+
+        gridOverlay.isUserInteractionEnabled = false
+        gridOverlay.translatesAutoresizingMaskIntoConstraints = false
+        gridLines.strokeColor = UIColor.white.withAlphaComponent(0.24).cgColor
+        gridLines.lineWidth = 0.5
+        gridLines.fillColor = nil
+        gridOverlay.layer.addSublayer(gridLines)
+        previewContainer.addSubview(gridOverlay)
+        let hint = UIView()
+        hint.backgroundColor = UIColor.black.withAlphaComponent(0.68)
+        hint.layer.cornerRadius = 17
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        previewContainer.addSubview(hint)
         status.text = "Preparando camera..."
         status.textColor = .white
         status.textAlignment = .center
         status.font = .preferredFont(forTextStyle: .caption1)
-        status.numberOfLines = 2
+        status.adjustsFontForContentSizeCategory = true
+        status.numberOfLines = 0
+        status.translatesAutoresizingMaskIntoConstraints = false
+        hint.addSubview(status)
+
+        pageModes.selectedSegmentIndex = 0
+        pageModes.backgroundColor = UIColor.black.withAlphaComponent(0.64)
+        pageModes.selectedSegmentTintColor = UIColor.white.withAlphaComponent(0.24)
+        pageModes.setTitleTextAttributes([.foregroundColor: UIColor.white,
+            .font: UIFont.systemFont(ofSize: 12, weight: .medium)], for: .normal)
+        pageModes.setTitleTextAttributes([.foregroundColor: UIColor.white,
+            .font: UIFont.systemFont(ofSize: 12, weight: .semibold)], for: .selected)
+        pageModes.layer.cornerRadius = 16
+        pageModes.clipsToBounds = true
+        pageModes.accessibilityIdentifier = "camera.page-mode"
+        pageModes.addTarget(self, action: #selector(changeMode), for: .valueChanged)
+        pageModes.isHidden = singleOnly
+        pageModes.translatesAutoresizingMaskIntoConstraints = false
+        previewContainer.addSubview(pageModes)
+
+        modeStrip.backgroundColor = UIColor(white: 0.035, alpha: 1)
+        modeStrip.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(modeStrip)
         modes.selectedSegmentIndex = 0
-        modes.selectedSegmentTintColor = UIColor(red: 0.08, green: 0.61, blue: 0.39, alpha: 1)
-        modes.setTitleTextAttributes([.foregroundColor: UIColor.white], for: .normal)
+        modes.backgroundColor = .clear
+        modes.selectedSegmentTintColor = .clear
+        modes.setBackgroundImage(UIImage(), for: .normal, barMetrics: .default)
+        modes.setDividerImage(UIImage(), forLeftSegmentState: .normal, rightSegmentState: .normal, barMetrics: .default)
+        modes.setTitleTextAttributes([.foregroundColor: UIColor.white,
+            .font: UIFont.systemFont(ofSize: 13, weight: .regular)], for: .normal)
+        modes.setTitleTextAttributes([.foregroundColor: accent,
+            .font: UIFont.systemFont(ofSize: 13, weight: .semibold)], for: .selected)
+        modes.accessibilityIdentifier = "camera.mode"
         modes.addTarget(self, action: #selector(changeMode), for: .valueChanged)
         modes.isHidden = singleOnly
-        shutter.backgroundColor = .white
-        shutter.layer.cornerRadius = 34
-        shutter.layer.borderWidth = 5
-        shutter.layer.borderColor = UIColor.gray.cgColor
+        modes.translatesAutoresizingMaskIntoConstraints = false
+        modeStrip.addSubview(modes)
+        modeMarker.backgroundColor = accent
+        modeMarker.layer.cornerRadius = 1.5
+        modeMarker.isHidden = singleOnly
+        modeMarker.isUserInteractionEnabled = false
+        modeStrip.addSubview(modeMarker)
+
         shutter.accessibilityLabel = "Capturar pagina"
         shutter.accessibilityIdentifier = "camera.shutter"
         shutter.addTarget(self, action: #selector(takePhoto), for: .touchUpInside)
         shutter.isEnabled = false
-        finish.setTitle("Concluir (0)", for: .normal)
+        shutter.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(shutter)
+        finish.setImage(UIImage(systemName: "photo.on.rectangle"), for: .normal)
+        finish.accessibilityLabel = "Concluir lote"
+        finish.accessibilityValue = "0 paginas capturadas"
+        finish.accessibilityHint = "Abre as paginas capturadas no editor."
+        finish.accessibilityIdentifier = "camera.finish"
         finish.isEnabled = false
         finish.addTarget(self, action: #selector(finishCapture), for: .touchUpInside)
-        let row = UIStackView(arrangedSubviews: [UIView(), shutter, UIView(), finish])
-        row.alignment = .center
-        row.spacing = 20
-        let column = UIStackView(arrangedSubviews: [status, modes, row])
-        column.axis = .vertical
-        column.spacing = 18
-        column.translatesAutoresizingMaskIntoConstraints = false
-        panel.addSubview(column)
+        finish.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(finish)
+        captureThumbnail.contentMode = .scaleAspectFill
+        captureThumbnail.clipsToBounds = true
+        captureThumbnail.layer.cornerRadius = 6
+        captureThumbnail.layer.borderWidth = 1
+        captureThumbnail.layer.borderColor = UIColor.white.withAlphaComponent(0.65).cgColor
+        captureThumbnail.isHidden = true
+        captureThumbnail.isAccessibilityElement = false
+        captureThumbnail.translatesAutoresizingMaskIntoConstraints = false
+        finish.addSubview(captureThumbnail)
+        captureCount.textColor = .white
+        captureCount.backgroundColor = accent
+        captureCount.font = .systemFont(ofSize: 12, weight: .bold)
+        captureCount.textAlignment = .center
+        captureCount.layer.cornerRadius = 12
+        captureCount.clipsToBounds = true
+        captureCount.isHidden = true
+        captureCount.isAccessibilityElement = false
+        captureCount.translatesAutoresizingMaskIntoConstraints = false
+        finish.addSubview(captureCount)
+
         qrText.backgroundColor = UIColor.black.withAlphaComponent(0.8)
         qrText.textColor = .white
         qrText.font = .preferredFont(forTextStyle: .body)
@@ -123,19 +220,56 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         copyQR.translatesAutoresizingMaskIntoConstraints = false
         copyQR.addTarget(self, action: #selector(copyCode), for: .touchUpInside)
         view.addSubview(copyQR)
-        view.tintColor = .white
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 22),
-            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -22),
+            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
+            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
+            header.heightAnchor.constraint(equalToConstant: 44),
+            previewContainer.topAnchor.constraint(equalTo: header.bottomAnchor),
+            previewContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            previewContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            previewContainer.bottomAnchor.constraint(equalTo: panel.topAnchor),
+            gridOverlay.topAnchor.constraint(equalTo: previewContainer.topAnchor),
+            gridOverlay.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor),
+            gridOverlay.leadingAnchor.constraint(equalTo: previewContainer.leadingAnchor),
+            gridOverlay.trailingAnchor.constraint(equalTo: previewContainer.trailingAnchor),
+            hint.topAnchor.constraint(equalTo: previewContainer.topAnchor, constant: 22),
+            hint.centerXAnchor.constraint(equalTo: previewContainer.centerXAnchor),
+            hint.leadingAnchor.constraint(greaterThanOrEqualTo: previewContainer.leadingAnchor, constant: 24),
+            hint.trailingAnchor.constraint(lessThanOrEqualTo: previewContainer.trailingAnchor, constant: -24),
+            hint.widthAnchor.constraint(lessThanOrEqualToConstant: 320),
+            status.leadingAnchor.constraint(equalTo: hint.leadingAnchor, constant: 16),
+            status.trailingAnchor.constraint(equalTo: hint.trailingAnchor, constant: -16),
+            status.topAnchor.constraint(equalTo: hint.topAnchor, constant: 10),
+            status.bottomAnchor.constraint(equalTo: hint.bottomAnchor, constant: -10),
+            pageModes.centerXAnchor.constraint(equalTo: previewContainer.centerXAnchor),
+            pageModes.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor, constant: -12),
+            pageModes.widthAnchor.constraint(equalToConstant: 128),
+            pageModes.heightAnchor.constraint(equalToConstant: 32),
             panel.leadingAnchor.constraint(equalTo: view.leadingAnchor), panel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             panel.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            column.topAnchor.constraint(equalTo: panel.topAnchor, constant: 16),
-            column.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -18),
-            column.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 18),
-            column.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -18),
-            shutter.widthAnchor.constraint(equalToConstant: 68), shutter.heightAnchor.constraint(equalToConstant: 68),
-            qrText.centerYAnchor.constraint(equalTo: view.centerYAnchor), qrText.heightAnchor.constraint(equalToConstant: 150),
+            modeStrip.topAnchor.constraint(equalTo: panel.topAnchor),
+            modeStrip.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+            modeStrip.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+            modeStrip.heightAnchor.constraint(equalToConstant: 44),
+            modes.topAnchor.constraint(equalTo: modeStrip.topAnchor),
+            modes.bottomAnchor.constraint(equalTo: modeStrip.bottomAnchor),
+            modes.leadingAnchor.constraint(equalTo: modeStrip.leadingAnchor, constant: 16),
+            modes.trailingAnchor.constraint(equalTo: modeStrip.trailingAnchor, constant: -16),
+            shutter.centerXAnchor.constraint(equalTo: panel.centerXAnchor),
+            shutter.topAnchor.constraint(equalTo: modeStrip.bottomAnchor, constant: 24),
+            shutter.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -38),
+            shutter.widthAnchor.constraint(equalToConstant: 72), shutter.heightAnchor.constraint(equalToConstant: 72),
+            finish.centerXAnchor.constraint(equalTo: shutter.centerXAnchor, constant: 112),
+            finish.centerYAnchor.constraint(equalTo: shutter.centerYAnchor),
+            finish.widthAnchor.constraint(equalToConstant: 64), finish.heightAnchor.constraint(equalToConstant: 64),
+            captureThumbnail.centerXAnchor.constraint(equalTo: finish.centerXAnchor),
+            captureThumbnail.centerYAnchor.constraint(equalTo: finish.centerYAnchor),
+            captureThumbnail.widthAnchor.constraint(equalToConstant: 48), captureThumbnail.heightAnchor.constraint(equalToConstant: 48),
+            captureCount.trailingAnchor.constraint(equalTo: finish.trailingAnchor),
+            captureCount.topAnchor.constraint(equalTo: finish.topAnchor),
+            captureCount.widthAnchor.constraint(equalToConstant: 24), captureCount.heightAnchor.constraint(equalToConstant: 24),
+            qrText.centerYAnchor.constraint(equalTo: previewContainer.centerYAnchor), qrText.heightAnchor.constraint(equalToConstant: 150),
             qrText.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             qrText.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             copyQR.topAnchor.constraint(equalTo: qrText.bottomAnchor, constant: 8),
@@ -178,15 +312,35 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        preview?.frame = view.bounds
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        preview?.frame = previewContainer.bounds
+        gridLines.frame = gridOverlay.bounds
+        let lines = UIBezierPath()
+        for division in 1...2 {
+            let fraction = CGFloat(division) / 3
+            let x = gridOverlay.bounds.width * fraction
+            let y = gridOverlay.bounds.height * fraction
+            lines.move(to: CGPoint(x: x, y: 0))
+            lines.addLine(to: CGPoint(x: x, y: gridOverlay.bounds.height))
+            lines.move(to: CGPoint(x: 0, y: y))
+            lines.addLine(to: CGPoint(x: gridOverlay.bounds.width, y: y))
+        }
+        gridLines.path = lines.cgPath
+        CATransaction.commit()
+        let segmentWidth = modes.bounds.width / CGFloat(modes.numberOfSegments)
+        modeMarker.frame = CGRect(x: modes.frame.minX + segmentWidth * (CGFloat(modes.selectedSegmentIndex) + 0.5) - 13,
+                                  y: 0, width: 26, height: 3)
         if let connection = preview?.connection, connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
     }
     @objc private func takePhoto() {
         guard !ended, !capturing, mode != .qrCode, images.count < 50 else { return }
         capturing = true
+        shutter.isSelected = true
         shutter.isEnabled = false
         finish.isEnabled = false
         modes.isEnabled = false
+        pageModes.isEnabled = false
         let useFlash = flashOn
         captureQueue.async { [weak self] in
             guard let self = self else { return }
@@ -202,12 +356,19 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         DispatchQueue.main.async {
             guard !self.ended else { return }
             self.capturing = false
+            self.shutter.isSelected = false
             self.modes.isEnabled = true
+            self.pageModes.isEnabled = true
             self.shutter.isEnabled = true
             if let error = error { self.status.text = error.localizedDescription; self.finish.isEnabled = !self.images.isEmpty; return }
             guard let data = data else { self.status.text = "Captura sem imagem. Tente novamente."; self.finish.isEnabled = !self.images.isEmpty; return }
             self.images.append(data)
-            self.finish.setTitle("Concluir (\(self.images.count))", for: .normal)
+            self.captureThumbnail.image = UIImage(data: data)
+            self.captureThumbnail.isHidden = false
+            self.captureCount.text = "\(self.images.count)"
+            self.captureCount.isHidden = false
+            self.finish.setImage(nil, for: .normal)
+            self.finish.accessibilityValue = "\(self.images.count) paginas capturadas"
             self.finish.isEnabled = true
             self.status.text = "\(self.images.count) paginas capturadas"
             if self.mode != .multiplePages || self.singleOnly { self.finishCapture() }
@@ -215,17 +376,28 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         }
     }
     @objc private func changeMode() {
-        let available: [NativeScanConfiguration.CameraMode] = [.singlePage, .multiplePages, .textRecognition, .qrCode]
+        let documentMode: NativeScanConfiguration.CameraMode = pageModes.selectedSegmentIndex == 1 ? .multiplePages : .singlePage
+        let available: [NativeScanConfiguration.CameraMode] = [documentMode, .textRecognition, .qrCode]
         mode = available[modes.selectedSegmentIndex]
         let qr = mode == .qrCode
+        pageModes.isHidden = singleOnly || modes.selectedSegmentIndex != 0
         shutter.isHidden = qr
         qrText.isHidden = !qr
         copyQR.isHidden = !qr
         status.text = qr ? "Aponte para um QR. Links nao sao abertos automaticamente." : "Enquadre o documento e toque para capturar."
+        view.setNeedsLayout()
     }
     @objc private func toggleFlash(_ sender: UIButton) {
         flashOn.toggle()
         sender.setImage(UIImage(systemName: flashOn ? "bolt.fill" : "bolt.slash"), for: .normal)
+        sender.tintColor = flashOn ? accent : .white
+        sender.accessibilityValue = flashOn ? "Ativado" : "Desativado"
+    }
+    @objc private func toggleGrid(_ sender: UIButton) {
+        gridOverlay.isHidden.toggle()
+        sender.isSelected = !gridOverlay.isHidden
+        sender.tintColor = gridOverlay.isHidden ? .white : accent
+        sender.accessibilityValue = gridOverlay.isHidden ? "Desativada" : "Ativada"
     }
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput objects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard !ended, mode == .qrCode,
@@ -258,4 +430,48 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
     private func fail(_ message: String) { DispatchQueue.main.async { guard !self.ended else { return }; self.ended = true; self.stop(); self.onError?(message) } }
     func stop() { captureQueue.async { [session] in if session.isRunning { session.stopRunning() } } }
     deinit { NotificationCenter.default.removeObserver(self) }
+}
+
+// Capture feedback only: the teal ring does not imply automatic edge detection.
+private final class CameraShutterButton: UIButton {
+    private let disc = CALayer()
+    private let ring = CAShapeLayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isAccessibilityElement = true
+        ring.fillColor = nil
+        ring.lineWidth = 3
+        layer.addSublayer(disc)
+        layer.addSublayer(ring)
+        updateAppearance()
+    }
+
+    required init?(coder: NSCoder) { fatalError("Use init(frame:)") }
+
+    override var isEnabled: Bool { didSet { updateAppearance() } }
+    override var isHighlighted: Bool { didSet { updateAppearance() } }
+    override var isSelected: Bool { didSet { updateAppearance() } }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        disc.frame = bounds.insetBy(dx: 8, dy: 8)
+        disc.cornerRadius = disc.bounds.width / 2
+        ring.frame = bounds
+        ring.path = UIBezierPath(ovalIn: bounds.insetBy(dx: 2, dy: 2)).cgPath
+        CATransaction.commit()
+    }
+
+    private func updateAppearance() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        disc.backgroundColor = UIColor.white.cgColor
+        ring.strokeColor = (isHighlighted || isSelected
+            ? UIColor(red: 0.12, green: 0.78, blue: 0.65, alpha: 1)
+            : UIColor(white: 0.26, alpha: 1)).cgColor
+        alpha = isEnabled || isSelected ? 1 : 0.45
+        CATransaction.commit()
+    }
 }

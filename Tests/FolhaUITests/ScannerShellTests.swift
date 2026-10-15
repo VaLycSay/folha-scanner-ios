@@ -13,7 +13,12 @@ final class ScannerShellTests: XCTestCase {
     func testHomeHasToolsSearchAndCamera() {
         let app = launch(seeded: false)
         defer { app.terminate() }
-        XCTAssertTrue(app.textFields["library.search"].exists)
+        let search = app.textFields["library.search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 20))
+        if !search.exists {
+            let state = XCTAttachment(string: app.debugDescription)
+            state.name = "REA-v04-search-accessibility"; state.lifetime = .keepAlways; add(state)
+        }
         XCTAssertTrue(app.buttons["library.scan"].exists)
         for label in ["Digitalizar", "Importar fotos", "Importar arquivos", "PDF", "Extrair texto", "Assinatura", "Filtros", "Todas"] {
             XCTAssertTrue(app.buttons["library.tool.\(label)"].exists, label)

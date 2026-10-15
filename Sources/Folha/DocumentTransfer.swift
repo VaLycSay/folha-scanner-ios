@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import CoreGraphics
 import ImageIO
+import PDFKit
 
 /// Independent, local-only import/export. No PDF actions, JavaScript, web views,
 /// document converters, or original-image fallback are used here.
@@ -239,7 +240,26 @@ enum DocumentTransfer {
     }
 
     private static func importPDF(_ data: Data) throws -> [ScanInput] {
-        guard let provider = CGDataProvider(data: data as CFData), let pdf = CGPDFDocument(provider) else {
+        guard let provider = CGDataProvider(data: data as CFData) else {
+            throw Failure.invalidPDF
+        }
+        guard let pdf = CGPDFDocument(provider) else {
+            // A nil Quartz document is not proof of corrupt syntax: the CI
+            // zero-page fixture reaches this branch before numberOfPages can
+            // be inspected. Use a second parser ONLY to classify the error.
+            // Never infer emptiness from PDF headers or raw /Count 0 tokens.
+            // This remains on the import worker with bounded input data; no
+            // PDFView, document actions, JavaScript or page rendering is used.
+            if let diagnostic = PDFDocument(data: data) {
+                // A locked document can report zero accessible pages. Check
+                // security first so it cannot be mislabeled as an empty PDF.
+                guard !diagnostic.isLocked || diagnostic.unlock(withPassword: "") else {
+                    throw Failure.passwordRequired
+                }
+                if diagnostic.pageCount == 0 { throw Failure.emptyPDF }
+            }
+            // If PDFKit cannot establish an unlocked, zero-page document,
+            // keep the original error. Do not import a repaired/partial PDF.
             throw Failure.invalidPDF
         }
         guard !pdf.isEncrypted || pdf.isUnlocked || pdf.unlockWithPassword("") else { throw Failure.passwordRequired }

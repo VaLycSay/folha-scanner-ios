@@ -16,9 +16,17 @@ private enum HomeTab: String, CaseIterable {
 }
 
 private enum HomeTool: String, CaseIterable, Identifiable {
-    case scan = "Digitalizar", photos = "Importar fotos", files = "Importar arquivos", pdf = "PDF"
+    case scan = "Digitalizar", pdf = "PDF", photos = "Importar fotos", files = "Importar arquivos"
     case text = "Extrair texto", signature = "Assinatura", filters = "Filtros", all = "Todas"
     var id: String { rawValue }
+    var displayTitle: String {
+        switch self {
+        case .pdf: return "Ferramentas PDF"
+        case .photos: return "Importar imagens"
+        case .all: return "Tudo"
+        default: return rawValue
+        }
+    }
     var symbol: String {
         switch self {
         case .scan: return "viewfinder"
@@ -89,7 +97,7 @@ struct ScannerHomeScreen: View {
             }.background(ScannerAppearance.surface).accessibilityIdentifier("library.screen")
                 .navigationTitle("Documentos").navigationBarTitleDisplayMode(.inline)
                 .toolbar(.hidden, for: .navigationBar)
-                .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
+                .safeAreaInset(edge: .bottom, spacing: 0) { if path.isEmpty { bottomBar } }
                 .navigationDestination(for: UUID.self) { id in ScannerDocumentScreen(id: id, startWithText: textDestination == id) }
                 .fullScreenCover(isPresented: $camera) {
                     NativeCameraSheet(onFinish: { bytes in
@@ -126,7 +134,7 @@ struct ScannerHomeScreen: View {
     private var searchField: some View {
         HStack(spacing: 9) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Pesquisar documentos e texto", text: $search).font(.subheadline).accessibilityIdentifier("library.search")
+            ScannerSearchField(text: $search).frame(height: 28)
             if !search.isEmpty {
                 Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
                     .accessibilityLabel("Limpar pesquisa")
@@ -144,7 +152,7 @@ struct ScannerHomeScreen: View {
                         Image(systemName: item.symbol).font(.system(size: 23, weight: .medium))
                             .foregroundStyle(item.color).frame(width: 49, height: 49)
                             .background(item.color.opacity(0.07), in: Circle())
-                        Text(item.rawValue).font(.system(size: 11, weight: .medium)).foregroundStyle(.primary)
+                        Text(item.displayTitle).font(.system(size: 11, weight: .medium)).foregroundStyle(.primary)
                             .multilineTextAlignment(.center).lineLimit(2).frame(height: 28, alignment: .top)
                     }.frame(maxWidth: .infinity)
                 }.buttonStyle(.plain).accessibilityIdentifier("library.tool.\(item.id)")
@@ -155,10 +163,12 @@ struct ScannerHomeScreen: View {
     private var documentLibrary: some View {
         VStack(spacing: 16) {
             HStack {
-                Text(tab == .home ? "Recentes" : "Todos os documentos").font(.system(size: 21, weight: .semibold))
+                Text(tab == .home ? "Recentes" : "Todos os documentos").font(.system(size: 17, weight: .medium))
                 Spacer()
                 if tab == .home {
-                    Button { tab = .files } label: { Label("Ver todos", systemImage: "chevron.right").font(.caption) }
+                    Button { tab = .files } label: {
+                        HStack(spacing: 4) { Text("Exibir tudo"); Image(systemName: "chevron.right") }.font(.caption)
+                    }
                 } else {
                     Menu {
                         Button("Mais recentes", systemImage: "clock") { alphabetical = false }
@@ -221,7 +231,6 @@ struct ScannerHomeScreen: View {
 
     private var bottomBar: some View {
         VStack(spacing: 0) {
-            Divider()
             if !selected.isEmpty {
                 HStack {
                     Button("Cancelar") { selected.removeAll() }
@@ -237,17 +246,23 @@ struct ScannerHomeScreen: View {
                     Button { camera = true } label: {
                         Image(systemName: "camera.fill").font(.system(size: 24)).foregroundStyle(.white)
                             .frame(width: 55, height: 55).background(ScannerAppearance.accent, in: Circle())
-                    }.accessibilityLabel("Digitalizar").accessibilityIdentifier("library.scan").frame(maxWidth: .infinity)
+                    }.accessibilityLabel("Digitalizar").accessibilityIdentifier("library.scan")
+                        .offset(y: -10).frame(maxWidth: .infinity)
                     tabButton(.tools)
                     tabButton(.me)
-                }.padding(.top, 8).padding(.bottom, 3)
+                }.padding(.horizontal, 5).padding(.top, 3)
             }
-        }.background(ScannerAppearance.surface)
+        }.background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+            .padding(.horizontal, 16).padding(.bottom, 6)
     }
 
     private func tabButton(_ item: HomeTab) -> some View {
         Button { tab = item; selected.removeAll() } label: {
-            VStack(spacing: 5) { Image(systemName: item.symbol).font(.system(size: 18)); Text(item.rawValue).font(.system(size: 10)) }
+            VStack(spacing: 5) {
+                Image(systemName: item.symbol).font(.system(size: 18))
+                Text(item == .files ? "Documentos" : item.rawValue).font(.system(size: 10)).lineLimit(1).minimumScaleFactor(0.8)
+            }
                 .foregroundStyle(tab == item ? ScannerAppearance.accent : ScannerAppearance.mutedInk)
                 .frame(maxWidth: .infinity).frame(height: 55)
         }.buttonStyle(.plain).accessibilityIdentifier("library.tab.\(item.rawValue)")
@@ -327,6 +342,7 @@ private struct ScannerDocumentScreen: View {
     @EnvironmentObject private var store: DocumentStore
     let id: UUID
     var startWithText = false
+    @State private var editingPageID: UUID?
     @State private var textMode = false
     @State private var reordering = false
     @State private var rename = false
@@ -365,7 +381,10 @@ private struct ScannerDocumentScreen: View {
                         Section {
                             LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 18) {
                                 ForEach(Array(document.pages.enumerated()), id: \.element.id) { index, page in
-                                    NavigationLink { RecoveredPageEditor(documentID: id, pageID: page.id) } label: {
+                                    Button {
+                                        guard editingPageID == nil else { return }
+                                        editingPageID = page.id
+                                    } label: {
                                         VStack(spacing: 8) {
                                             pageImage(page, document: document).frame(height: 200).frame(maxWidth: .infinity)
                                                 .background(ScannerAppearance.surface).overlay(Rectangle().stroke(Color.gray.opacity(0.14)))
@@ -383,6 +402,9 @@ private struct ScannerDocumentScreen: View {
                     }.listRowBackground(ScannerAppearance.canvas).listRowSeparator(.hidden)
                 }.listStyle(.plain).scrollContentBackground(.hidden).background(ScannerAppearance.canvas)
                     .accessibilityIdentifier("document.screen")
+                    .navigationDestination(item: $editingPageID) { pageID in
+                        RecoveredPageEditor(documentID: id, pageID: pageID)
+                    }
                     .navigationTitle(document.title).navigationBarTitleDisplayMode(.inline).toolbar(.visible, for: .navigationBar)
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
@@ -391,6 +413,7 @@ private struct ScannerDocumentScreen: View {
                         }
                     }
                     .safeAreaInset(edge: .bottom, spacing: 0) {
+                        if editingPageID == nil {
                         HStack {
                             footerButton("Adicionar", icon: "plus") { add = true }
                             footerButton(reordering ? "Concluir" : "Ordenar", icon: reordering ? "checkmark" : "square.grid.2x2") { reordering.toggle(); textMode = false }
@@ -399,6 +422,7 @@ private struct ScannerDocumentScreen: View {
                             footerButton("Compartilhar", icon: "square.and.arrow.up") { export = true }
                                 .accessibilityIdentifier("document.share").disabled(document.pages.isEmpty)
                         }.padding(.vertical, 10).background(ScannerAppearance.surface).overlay(alignment: .top) { Divider() }
+                        }
                     }
                     .alert("Renomear documento", isPresented: $rename) {
                         TextField("Nome", text: $title).accessibilityIdentifier("document.renameField")
@@ -535,6 +559,36 @@ private struct ScannerExportSheet: View {
 }
 
 private struct ExportFileSet: Identifiable { let id = UUID(); let urls: [URL] }
+private struct ScannerSearchField: UIViewRepresentable {
+    @Binding var text: String
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+    func makeUIView(context: Context) -> UITextField {
+        let field = UITextField()
+        field.placeholder = "Pesquisar documentos e texto"
+        field.font = UIFont.preferredFont(forTextStyle: .subheadline)
+        field.adjustsFontForContentSizeCategory = true
+        field.borderStyle = .none
+        field.backgroundColor = .clear
+        field.returnKeyType = .search
+        field.autocapitalizationType = .none
+        field.accessibilityIdentifier = "library.search"
+        field.isAccessibilityElement = true
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.delegate = context.coordinator
+        field.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .editingChanged)
+        return field
+    }
+    func updateUIView(_ field: UITextField, context: Context) {
+        context.coordinator.text = $text
+        if field.text != text { field.text = text }
+    }
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        var text: Binding<String>
+        init(text: Binding<String>) { self.text = text }
+        @objc func changed(_ sender: UITextField) { text.wrappedValue = sender.text ?? "" }
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool { textField.resignFirstResponder(); return true }
+    }
+}
 private struct ScannerActivitySheet: UIViewControllerRepresentable {
     let urls: [URL]
     func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: urls, applicationActivities: nil) }

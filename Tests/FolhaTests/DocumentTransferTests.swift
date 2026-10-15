@@ -161,6 +161,15 @@ final class DocumentTransferTests: XCTestCase {
 
     func testEmptyPDFInvalidPDFAndEmptyFileHaveDistinctErrors() async throws {
         let emptyPDF = try writePDF([])
+        let emptyPDFData = try Data(contentsOf: emptyPDF)
+        XCTAssertFalse(emptyPDFData.isEmpty)
+        // Assert the fixture's meaning independently of DocumentTransfer.
+        // If a platform cannot parse it, fail here rather than silently
+        // relabeling malformed input as empty or weakening the expected error.
+        let parsedEmptyPDF = try XCTUnwrap(PDFDocument(data: emptyPDFData),
+            "PDFKit must recognize the zero-page PDF fixture")
+        XCTAssertFalse(parsedEmptyPDF.isLocked)
+        XCTAssertEqual(parsedEmptyPDF.pageCount, 0)
         await expectFailure(.emptyPDF) { _ = try await DocumentTransfer.importFile(emptyPDF) }
         let invalid = try root().appendingPathComponent("invalid.pdf")
         try Data("not a PDF".utf8).write(to: invalid)
@@ -168,6 +177,26 @@ final class DocumentTransferTests: XCTestCase {
         let empty = try root().appendingPathComponent("empty.pdf")
         try Data().write(to: empty)
         await expectFailure(.emptyFile) { _ = try await DocumentTransfer.importFile(empty) }
+    }
+
+    func testPDFHeaderAndZeroCountTokensDoNotMakeInvalidDataAnEmptyPDF() async throws {
+        let invalid = try root().appendingPathComponent("fake-empty.pdf")
+        // The page-tree-looking text is only a comment; there are no objects,
+        // catalog, cross-reference table or trailer establishing a document.
+        let data = Data("%PDF-1.4\n% /Type /Pages /Kids [] /Count 0\n%%EOF\n".utf8)
+        try data.write(to: invalid)
+        XCTAssertNil(PDFDocument(data: data))
+        await expectFailure(.invalidPDF) { _ = try await DocumentTransfer.importFile(invalid) }
+    }
+
+    func testOneWhitePDFPageIsNotAZeroPageDocument() async throws {
+        let url = try writePDF([PDFSpec(box: CGRect(x: 0, y: 0, width: 100, height: 200), color: "1 1 1")])
+        let inputs = try await DocumentTransfer.importFile(url)
+        XCTAssertEqual(inputs.count, 1)
+        guard case .camera(let image) = inputs[0] else { return XCTFail("Expected camera input") }
+        XCTAssertFalse(inputs[0].autoCrop)
+        XCTAssertEqual(image.size, CGSize(width: 200, height: 400))
+        XCTAssertTrue(try pixel(image, x: 100, y: 200).prefix(3).allSatisfy { $0 > 240 })
     }
 
     func testPasswordProtectedPDFIsRejected() async throws {

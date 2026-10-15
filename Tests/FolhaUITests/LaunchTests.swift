@@ -458,6 +458,7 @@ final class LaunchTests: XCTestCase {
             object: target)
         guard XCTWaiter.wait(for: [ready], timeout: timeout) == .completed else {
             capture("failure-control-not-interactable", app: app)
+            record("failure-control-full-AX", text: app.debugDescription)
             XCTFail("Control not interactable: \(target.identifier)")
             throw FlowFailure.missingElement(target.identifier)
         }
@@ -469,6 +470,7 @@ final class LaunchTests: XCTestCase {
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: target)
         guard XCTWaiter.wait(for: [gone], timeout: timeout) == .completed else {
             capture("failure-transition", app: app)
+            record("failure-transition-full-AX", text: app.debugDescription)
             XCTFail("Control did not disappear after completing its flow: \(target.identifier)")
             throw FlowFailure.transition(target.identifier)
         }
