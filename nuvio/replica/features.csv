@@ -1,0 +1,11 @@
+feature,area,priority,original,clone,notes
+Original MPV and Nuvio Engine,playback,must,yes,partial,Source/dependencies retained; runtime verification pending
+Catalog search and details,discovery,must,yes,partial,No source change; service configuration and device test pending
+Profiles and watch history,library,must,yes,partial,No data model or persistence change; account test pending
+Subtitles and audio tracks,playback,must,yes,partial,Selectors and decoding retained; device test pending
+PiP playback,iOS,must,yes,partial,State correction applied; physical PiP test pending
+Downloads and widget,offline,must,yes,partial,Original targets retained; device test pending
+Third-party integrations,integrations,must,yes,partial,Code retained; TMDB key and authenticated services not proven
+Nonblocking audio session,iOS,should,no,partial,Adapted Enhanced patch; build/test pending
+Preserve explicit pause after background,iOS,should,no,partial,Focused lifecycle change; device test pending
+Timeline hold keeps controls visible,interface,should,no,partial,Both layouts updated; Compose tests prepared
