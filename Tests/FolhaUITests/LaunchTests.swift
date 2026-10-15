@@ -3,6 +3,8 @@ import XCTest
 final class LaunchTests: XCTestCase {
     private let timeout: TimeInterval = 45
     private let seedTitle = "Documento de teste REA"
+    private var appForDiagnostics: XCUIApplication?
+    private var capturedFailureDiagnostics = false
 
     private enum FlowFailure: Error {
         case missingElement(String)
@@ -12,6 +14,22 @@ final class LaunchTests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        appForDiagnostics = nil
+        capturedFailureDiagnostics = false
+    }
+
+    override func record(_ issue: XCTIssue) {
+        // XCTest can fail inside an AX query before our readiness guard returns.
+        // Capture before continueAfterFailure=false terminates the test. Never
+        // dispatch synchronously to the main thread or recursively retry AX.
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                if let app = appForDiagnostics {
+                    captureFailureDiagnostics(app)
+                }
+            }
+        }
+        super.record(issue)
     }
 
     @MainActor
@@ -131,10 +149,9 @@ final class LaunchTests: XCTestCase {
         let renamed = "Documento REA renomeado"
         try tap(field, app: app)
         try dismissKeyboardIntroductionIfPresent(app)
-        // This synthetic Latin title occupies one line. A center tap can put
-        // the caret before REA; explicitly move to the trailing interior first.
-        field.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap()
-        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: original.count + 1))
+        // A field-relative tap is not a text-end operation, especially when the
+        // title is clipped. Use the system's actual selection action instead.
+        try selectAllAndDelete(field, app: app)
         let clearedValue = try XCTUnwrap(field.value as? String)
         // Native UITextField accessibility returns its placeholder when empty.
         // The exact new value assertion below still rejects leftover text.
@@ -166,6 +183,33 @@ final class LaunchTests: XCTestCase {
     }
 
     @MainActor
+    private func selectAllAndDelete(_ field: XCUIElement, app: XCUIApplication) throws {
+        field.press(forDuration: 1.0)
+        let selectionLabel = NSPredicate(format: "label IN %@",
+            ["Select All", "Selecionar Tudo", "Selecionar tudo"])
+        // iOS exposes edit actions as menu items or buttons depending on the
+        // system version. Both queries remain typed and match only Select All.
+        let items = app.menuItems.matching(selectionLabel)
+        let buttons = app.buttons.matching(selectionLabel)
+        let selectionMenu = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            items.firstMatch.exists || buttons.firstMatch.exists
+        }, object: nil)
+        guard XCTWaiter.wait(for: [selectionMenu], timeout: 10) == .completed else {
+            XCTFail("Select All did not appear for the rename field; no deletion was attempted.")
+            throw FlowFailure.missingElement("rename Select All")
+        }
+        let actions = items.firstMatch.exists ? items : buttons
+        guard actions.count == 1 else {
+            XCTFail("Expected exactly one Select All action in the rename edit menu.")
+            throw FlowFailure.transition("ambiguous rename selection")
+        }
+        try tap(actions.firstMatch, app: app)
+        field.typeText(XCUIKeyboardKey.delete.rawValue)
+        // The caller must still assert an empty value (or the native placeholder)
+        // and the exact replacement before saving and reopening the document.
+    }
+
+    @MainActor
     private func dismissKeyboardIntroductionIfPresent(_ app: XCUIApplication) throws {
         // Actual simulator AX from run 38683538487: the first-run keyboard
         // tutorial owns this container, its explanatory text, and Continue.
@@ -191,7 +235,6 @@ final class LaunchTests: XCTestCase {
         }, object: nil)
         guard XCTWaiter.wait(for: [ready], timeout: 10) == .completed else {
             capture("failure-keyboard-introduction-guard", app: app)
-            record("keyboard-introduction-AX", text: app.debugDescription)
             XCTFail("Keyboard introduction must contain its typing/sliding hint and exactly one enabled Continue button.")
             throw FlowFailure.transition("keyboard introduction guard")
         }
@@ -200,7 +243,6 @@ final class LaunchTests: XCTestCase {
                                                  object: continueButton)
         guard XCTWaiter.wait(for: [tappable], timeout: 10) == .completed else {
             capture("failure-keyboard-continue-not-hittable", app: app)
-            record("keyboard-continue-AX", text: app.debugDescription)
             XCTFail("The identified keyboard introduction Continue button did not become hittable.")
             throw FlowFailure.transition("keyboard Continue readiness")
         }
@@ -264,6 +306,7 @@ final class LaunchTests: XCTestCase {
     @MainActor
     private func launchFixture(seeded: Bool) throws -> XCUIApplication {
         let app = XCUIApplication()
+        appForDiagnostics = app
         app.launchArguments = ["--uitesting"]
         if seeded { app.launchArguments.append("--seed-test-document") }
         // The application, not this runner, owns an isolated temporary namespace.
@@ -355,7 +398,6 @@ final class LaunchTests: XCTestCase {
             }, object: nil)
             guard XCTWaiter.wait(for: [exitOrConfirmation], timeout: timeout) == .completed else {
                 capture("failure-editor-cancel-transition", app: app)
-                record("editor-cancel-AX", text: app.debugDescription)
                 XCTFail("Editor cancellation neither dismissed the editor nor presented its discard confirmation.")
                 throw FlowFailure.transition("editor.cancel")
             }
@@ -431,17 +473,41 @@ final class LaunchTests: XCTestCase {
     }
 
     @MainActor
+    private func query(_ identifier: String, app: XCUIApplication) -> XCUIElementQuery {
+        switch identifier {
+        case "editor.adjustment.slider":
+            return app.sliders.matching(identifier: identifier)
+        case "document.screen":
+            return app.collectionViews.matching(identifier: identifier)
+        case "library.screen", "editor.screen", "pdf.preview":
+            // These are containers, never action targets. Controls must not use
+            // Any: SwiftUI also puts identifiers on surrounding Other elements.
+            return app.descendants(matching: .any).matching(identifier: identifier)
+        default:
+            return app.buttons.matching(identifier: identifier)
+        }
+    }
+
+    @MainActor
     private func element(_ identifier: String, app: XCUIApplication) -> XCUIElement {
-        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        query(identifier, app: app).firstMatch
     }
 
     @MainActor
     private func require(_ identifier: String, app: XCUIApplication) throws -> XCUIElement {
-        let result = element(identifier, app: app)
+        let matches = query(identifier, app: app)
+        let result = matches.firstMatch
         guard result.waitForExistence(timeout: timeout) else {
             capture("failure-missing-\(identifier)", app: app)
             XCTFail("Missing accessibility identifier: \(identifier)")
             throw FlowFailure.missingElement(identifier)
+        }
+        if !["library.screen", "document.screen", "editor.screen", "pdf.preview"].contains(identifier) {
+            let count = matches.count
+            guard count == 1 else {
+                XCTFail("Ambiguous typed control: \(identifier), matches: \(count).")
+                throw FlowFailure.transition("duplicate control \(identifier)")
+            }
         }
         return result
     }
@@ -458,7 +524,6 @@ final class LaunchTests: XCTestCase {
             object: target)
         guard XCTWaiter.wait(for: [ready], timeout: timeout) == .completed else {
             capture("failure-control-not-interactable", app: app)
-            record("failure-control-full-AX", text: app.debugDescription)
             XCTFail("Control not interactable: \(target.identifier)")
             throw FlowFailure.missingElement(target.identifier)
         }
@@ -470,7 +535,6 @@ final class LaunchTests: XCTestCase {
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: target)
         guard XCTWaiter.wait(for: [gone], timeout: timeout) == .completed else {
             capture("failure-transition", app: app)
-            record("failure-transition-full-AX", text: app.debugDescription)
             XCTFail("Control did not disappear after completing its flow: \(target.identifier)")
             throw FlowFailure.transition(target.identifier)
         }
@@ -514,6 +578,42 @@ final class LaunchTests: XCTestCase {
         _ = try require("document.screen", app: app)
         XCTAssertFalse(app.alerts.firstMatch.exists, "Saving must not leave an error alert.")
         try assertTwoPages(app)
+    }
+
+    @MainActor
+    private func captureFailureDiagnostics(_ app: XCUIApplication) {
+        guard !capturedFailureDiagnostics else { return }
+        // Set before touching AX: a failing snapshot may itself record an issue.
+        capturedFailureDiagnostics = true
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "REA-failure-screen"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        do {
+            let root = try app.snapshot()
+            var lines: [String] = []
+            func append(_ node: XCUIElementSnapshot, depth: Int) {
+                lines.append(String(repeating: "  ", count: depth) +
+                    "type=\(node.elementType) id=\(String(reflecting: node.identifier)) " +
+                    "label=\(String(reflecting: node.label)) value=\(String(describing: node.value)) " +
+                    "enabled=\(node.isEnabled) selected=\(node.isSelected) frame=\(node.frame)")
+                for child in node.children { append(child, depth: depth + 1) }
+            }
+            append(root, depth: 0)
+            let identified = snapshotTree(root).filter { !$0.identifier.isEmpty }
+            let groups = Dictionary(grouping: identified, by: { $0.identifier })
+            let duplicates = groups.keys.sorted().filter { groups[$0]!.count > 1 }.map { id in
+                let nodes = groups[id]!
+                let types = nodes.map { String(describing: $0.elementType) }.joined(separator: ", ")
+                return "\(id): \(nodes.count) nodes [\(types)]"
+            }
+            record("failure-full-AX", text: lines.joined(separator: "\n") +
+                "\n\nDuplicate identifiers (from the same snapshot):\n" +
+                (duplicates.isEmpty ? "None" : duplicates.joined(separator: "\n")))
+        } catch {
+            record("failure-AX-unavailable", text:
+                "One full AX snapshot failed: \(error). No retry; inspect the screenshot and runner log.")
+        }
     }
 
     @MainActor

@@ -92,9 +92,9 @@ struct ScannerHomeScreen: View {
                                 }.foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }.padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 24)
-                    }.scrollDismissesKeyboard(.interactively)
+                    }.scrollDismissesKeyboard(.interactively).accessibilityIdentifier("library.screen")
                 }
-            }.background(ScannerAppearance.surface).accessibilityIdentifier("library.screen")
+            }.background(ScannerAppearance.surface)
                 .navigationTitle("Documentos").navigationBarTitleDisplayMode(.inline)
                 .toolbar(.hidden, for: .navigationBar)
                 .safeAreaInset(edge: .bottom, spacing: 0) { if path.isEmpty { bottomBar } }

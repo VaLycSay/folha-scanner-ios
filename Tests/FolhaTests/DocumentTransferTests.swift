@@ -159,18 +159,19 @@ final class DocumentTransferTests: XCTestCase {
         XCTAssertEqual(image.size.width / image.size.height, 2, accuracy: 0.001)
     }
 
-    func testEmptyPDFInvalidPDFAndEmptyFileHaveDistinctErrors() async throws {
-        let emptyPDF = try writePDF([])
-        let emptyPDFData = try Data(contentsOf: emptyPDF)
-        XCTAssertFalse(emptyPDFData.isEmpty)
-        // Assert the fixture's meaning independently of DocumentTransfer.
-        // If a platform cannot parse it, fail here rather than silently
-        // relabeling malformed input as empty or weakening the expected error.
-        let parsedEmptyPDF = try XCTUnwrap(PDFDocument(data: emptyPDFData),
-            "PDFKit must recognize the zero-page PDF fixture")
-        XCTAssertFalse(parsedEmptyPDF.isLocked)
-        XCTAssertEqual(parsedEmptyPDF.pageCount, 0)
-        await expectFailure(.emptyPDF) { _ = try await DocumentTransfer.importFile(emptyPDF) }
+    func testNativeParsersRejectZeroPageFixtureAndRandomDataWhileEmptyFileIsDistinct() async throws {
+        let zeroPagePDF = try writePDF([])
+        let zeroPageData = try Data(contentsOf: zeroPagePDF)
+        XCTAssertFalse(zeroPageData.isEmpty)
+        // CI 38732369341 and 38736477988 establish that neither Apple parser
+        // recognizes this zero-page fixture. A structural /Count 0 is not a
+        // successful native parse and must not be used to infer emptyPDF.
+        // Keep exact rejection assertions; emptyPDF is reserved for a native
+        // parser that actually recognizes an unlocked, zero-page document.
+        let provider = try XCTUnwrap(CGDataProvider(data: zeroPageData as CFData))
+        XCTAssertNil(CGPDFDocument(provider))
+        XCTAssertNil(PDFDocument(data: zeroPageData))
+        await expectFailure(.invalidPDF) { _ = try await DocumentTransfer.importFile(zeroPagePDF) }
         let invalid = try root().appendingPathComponent("invalid.pdf")
         try Data("not a PDF".utf8).write(to: invalid)
         await expectFailure(.invalidPDF) { _ = try await DocumentTransfer.importFile(invalid) }

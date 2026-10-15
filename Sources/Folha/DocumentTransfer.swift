@@ -44,7 +44,7 @@ enum DocumentTransfer {
             case .unreadableFile(let name): return "Nao foi possivel ler o arquivo: \(name)."
             case .emptyFile: return "O arquivo esta vazio."
             case .fileTooLarge: return "O arquivo excede o limite seguro de 64 MiB."
-            case .invalidPDF: return "O PDF e invalido ou esta danificado."
+            case .invalidPDF: return "O PDF e invalido, esta danificado ou nao pode ser lido neste dispositivo."
             case .passwordRequired: return "O PDF esta criptografado e exige senha. Importe uma copia desbloqueada."
             case .emptyPDF: return "O PDF nao contem paginas."
             case .tooManyPages(let count): return "O PDF tem \(count) paginas; o limite e 50."
@@ -244,9 +244,10 @@ enum DocumentTransfer {
             throw Failure.invalidPDF
         }
         guard let pdf = CGPDFDocument(provider) else {
-            // A nil Quartz document is not proof of corrupt syntax: the CI
-            // zero-page fixture reaches this branch before numberOfPages can
-            // be inspected. Use a second parser ONLY to classify the error.
+            // Classify only what a native parser actually recognizes. Both
+            // Quartz and PDFKit can reject a structurally zero-page PDF;
+            // that unreadable input remains invalidPDF, not emptyPDF.
+            // Use the second parser ONLY to classify a recognized document.
             // Never infer emptiness from PDF headers or raw /Count 0 tokens.
             // This remains on the import worker with bounded input data; no
             // PDFView, document actions, JavaScript or page rendering is used.
