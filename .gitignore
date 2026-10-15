@@ -1,0 +1,9 @@
+.build/
+.build-ci/
+Folha.xcodeproj/
+reports/
+artifacts/
+*.ipa
+*.p12
+*.mobileprovision
+.DS_Store
