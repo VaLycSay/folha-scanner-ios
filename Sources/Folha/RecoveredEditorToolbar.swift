@@ -1,4 +1,5 @@
 import UIKit
+import SwiftUI
 
 // Native UI component, not a complete scanner. Wire onOperation to the editor.
 // Geometry and ordering are version-scoped static recoveries, not a claim of
@@ -11,8 +12,9 @@ public final class RecoveredEditorToolbar: UIView {
 
     private let titleForKey: (String) -> String
     private let imageForName: (String) -> UIImage?
-    private let accent: UIColor
-    private let surface: UIColor
+    private var accent: UIColor
+    private var surface: UIColor
+    private var mutedInk = UIColor.secondaryLabel
     private let strip = UIScrollView()
     private let content = UIView()
     private let trailingPanel = UIView()
@@ -50,6 +52,8 @@ public final class RecoveredEditorToolbar: UIView {
         addSubview(fadeView)
         done.backgroundColor = accent
         done.tintColor = .white
+        done.layer.cornerRadius = 4
+        done.setPreferredSymbolConfiguration(UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold), forImageIn: .normal)
         done.accessibilityLabel = titleForKey("Save")
         done.setImage(imageForName("ic_done_24px") ?? UIImage(systemName: "checkmark"), for: .normal)
         done.addAction(UIAction { [weak self] _ in
@@ -66,6 +70,14 @@ public final class RecoveredEditorToolbar: UIView {
     public func configure(layout: Contract.Layout, referenceMode: Int = 0,
                           viewType: Int = 0, showTitles: Bool = true) {
         spec = Contract.layout(layout, referenceMode: referenceMode, viewType: viewType)
+        // The bridge retains historical initializer defaults. A configured editor
+        // uses the shared app palette without changing its geometry/action contract.
+        accent = UIColor(ScannerAppearance.accent)
+        surface = UIColor(ScannerAppearance.surface)
+        mutedInk = UIColor(ScannerAppearance.mutedInk)
+        backgroundColor = surface
+        trailingPanel.backgroundColor = surface
+        done.backgroundColor = accent
         self.showTitles = showTitles
         selected.removeAll()
         strip.setContentOffset(.zero, animated: false)
@@ -110,13 +122,24 @@ public final class RecoveredEditorToolbar: UIView {
             : descriptor.localizedTitleKey
         var appearance = UIButton.Configuration.plain()
         appearance.image = descriptor.referenceImageName.flatMap(imageForName)
+        appearance.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 22, weight: .regular)
         appearance.imagePlacement = .top
-        appearance.imagePadding = 3
+        appearance.imagePadding = 4
         appearance.contentInsets = .zero
+        appearance.titleAlignment = .center
+        appearance.titleLineBreakMode = .byTruncatingTail
+        let iconColor = selected.contains(operation) ? accent : UIColor(white: 0.12, alpha: 1)
+        let titleColor = selected.contains(operation) ? accent : mutedInk
+        // Explicit transformers keep the bridge's legacy tint from recoloring
+        // captions or selected controls, and still distinguish disabled actions.
+        appearance.imageColorTransformer = UIConfigurationColorTransformer { [weak button] _ in
+            iconColor.withAlphaComponent(button?.isEnabled == false ? 0.3 : 1)
+        }
         if showTitles, let key = key { appearance.title = titleForKey(key) }
-        appearance.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+        appearance.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { [weak button] incoming in
             var result = incoming
             result.font = UIFont.preferredFont(forTextStyle: .caption2)
+            result.foregroundColor = titleColor.withAlphaComponent(button?.isEnabled == false ? 0.3 : 1)
             return result
         }
         button.configuration = appearance

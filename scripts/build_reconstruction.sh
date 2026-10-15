@@ -82,8 +82,8 @@ xcodebuild build -project Folha.xcodeproj -scheme Folha -configuration Release \
 tail -n 12 reports/device-build.log
 mkdir -p artifacts/Payload
 ditto .build-ci/device/Build/Products/Release-iphoneos/Folha.app artifacts/Payload/Folha.app
-(cd artifacts && ditto -c -k --keepParent Payload Scanner-REA-0.3.0-unsigned.ipa)
-python3 scripts/check_ipa.py artifacts/Scanner-REA-0.3.0-unsigned.ipa
-shasum -a 256 artifacts/Scanner-REA-0.3.0-unsigned.ipa > artifacts/Scanner-REA-0.3.0-unsigned.sha256
+(cd artifacts && ditto -c -k --keepParent Payload Scanner-REA-0.4.0-unsigned.ipa)
+python3 scripts/check_ipa.py artifacts/Scanner-REA-0.4.0-unsigned.ipa
+shasum -a 256 artifacts/Scanner-REA-0.4.0-unsigned.ipa > artifacts/Scanner-REA-0.4.0-unsigned.sha256
 cp RECONSTRUCTION.md artifacts/LEIA-ME.md
 printf '%s\n' 'IPA compiled; simulator tests passed. Physical camera and signing remain device tests.'

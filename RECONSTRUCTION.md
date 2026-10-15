@@ -1,11 +1,15 @@
-# Scanner REA 0.3.0
+# Scanner REA 0.4.0
 
 Independent implementation guided by static reverse-engineering evidence from
-the historical CamScanner 5.26.12 iOS reference. Not the original application,
+the historical CamScanner 5.26.12 reference and current 7.27.0 UI resources. Not the original application,
 not a renamed original binary, and not a claim of full functional/visual parity.
 
 ## Implemented scope
 
+- Search-first home, tool grid, recent documents and centered camera navigation.
+- Files list/grid, sorting, document selection and batch PDF sharing.
+- PDF/image file import, PDF/JPG/TXT export and a document export panel.
+- Page thumbnail grid, image/text switch and a refined editor presentation.
 - Document library, search, photo import, single/batch camera, QR text reading.
 - Local source preservation, append/replace pages, page reordering and removal.
 - Perspective crop and rotation.
@@ -26,6 +30,11 @@ decompilation and private analysis are NOT in this repository.
 Six primary filters and the processed toolbar order follow recovered contracts.
 Some fonts, colors, capture controls and image effects are independent choices.
 The original application was not executed for runtime or pixel comparison.
+The official 7.27.0 IPA has an encrypted main executable. Its REA resource
+evidence is not a recovery of its current native implementation. Official
+marketing images informed layout, but some contain visibly older sample dates
+and do not establish the exact current runtime interface. Full equivalence
+remains unproven; the 128-case kernel fixture is limited to historical contracts.
 
 ## Build and verification
 

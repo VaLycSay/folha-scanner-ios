@@ -293,16 +293,77 @@ private final class EditorViewModel: ObservableObject {
     }
 }
 
+// Presentation-only renders. Each copy goes through the existing engine, including
+// overlays, and never changes the editor's revision, draft or persistence pipeline.
+@MainActor
+private final class EditorFilterThumbnails: ObservableObject {
+    @Published private(set) var page: ScanPage?
+    @Published private(set) var images: [Int: UIImage] = [:]
+    private let worker = EditorImageWorker()
+    private var versions = EditorPreviewRevision()
+
+    func render(source: UIImage, page: ScanPage) {
+        reset()
+        let version = versions.current
+        let filters = EditorFilterCatalog.recoveredOrder + [.removeShadow]
+        worker.perform(revision: version, work: {
+            let thumbnailSource = ScanEngine.normalized(source, maximum: 240)
+            var result: [Int: UIImage] = [:]
+            for filter in filters {
+                var candidate = page
+                candidate.filter = filter
+                result[EditorFilterCatalog.nativeModeID(filter)] = try ScanEngine.recoveredPreview(
+                    source: thumbnailSource, page: &candidate)
+            }
+            return result
+        }, completion: { [weak self] result in
+            guard let self, self.versions.accepts(version) else { return }
+            if case .success(let images) = result {
+                self.images = images
+                self.page = page
+            }
+            // A thumbnail failure must not block editing or expose the raw source.
+        })
+    }
+
+    func reset() {
+        worker.invalidate(versions.advance())
+        page = nil
+        images = [:]
+    }
+}
+
 struct RecoveredPageEditor: View {
     typealias Contract = RecoveredEditorToolbarContract
+    private enum ContentMode: Hashable { case image, text }
     @EnvironmentObject private var store: DocumentStore
     @Environment(\.dismiss) private var dismiss
     let documentID: UUID
     let pageID: UUID
     @StateObject private var model = EditorViewModel()
+    @StateObject private var thumbnails = EditorFilterThumbnails()
+    @State private var contentMode: ContentMode = .image
     @State private var discardRequested = false
     @State private var deleteRequested = false
 
+    private var thumbnailRecipe: ScanPage? {
+        guard model.stage == .processed, model.source != nil, var page = model.draft else { return nil }
+        // Selecting a filter or completing OCR does not regenerate the whole strip.
+        page.filter = .natural
+        page.lines = []
+        page.ocrWarning = nil
+        return page
+    }
+    private var transcript: String {
+        if !model.recognizedText.isEmpty { return model.recognizedText }
+        guard let page = model.draft else { return "" }
+        return EditorGeometry.visibleOCR(page.lines, overlays: page.overlays ?? [])
+            .map(\.text).joined(separator: "\n")
+    }
+    private var navigationTitle: String {
+        if model.stage == .crop { return "Recortar pagina" }
+        return store.document(documentID)?.title ?? "Editar pagina"
+    }
     private var layout: Contract.Layout {
         switch model.stage {
         case .crop: return .crop
@@ -329,18 +390,19 @@ struct RecoveredPageEditor: View {
             stageHeader
             imageArea
             if let notice = model.notice {
-                Text(notice).font(.caption).foregroundStyle(.white.opacity(0.8)).padding(8)
+                Text(notice).font(.caption).foregroundStyle(ScannerAppearance.mutedInk)
+                    .multilineTextAlignment(.center).padding(8)
             }
         }
-        .background(Color(white: 0.07))
+        .background(ScannerAppearance.canvas)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("editor.screen")
-        .navigationTitle(model.stage == .crop ? "Recortar pagina" : "Editar pagina")
+        .navigationTitle(navigationTitle)
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
-        .toolbarBackground(Color(white: 0.07), for: .navigationBar)
+        .toolbarBackground(ScannerAppearance.surface, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        .toolbarColorScheme(.dark, for: .navigationBar)
+        .toolbarColorScheme(.light, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 Button("Cancelar") {
@@ -349,7 +411,9 @@ struct RecoveredPageEditor: View {
             }
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 if model.stage == .processed {
-                    Button { model.requestGeometry(.crop) } label: { Image(systemName: "crop") }
+                    Button { model.requestGeometry(.crop) } label: {
+                        Text("Reprocessar").font(.subheadline)
+                    }
                         .accessibilityLabel("Recortar").accessibilityIdentifier("editor.crop")
                         .disabled(model.controlsBlocked || store.isBusy)
                     Button { model.beginAdjustments() } label: { Image(systemName: "slider.horizontal.3") }
@@ -360,7 +424,7 @@ struct RecoveredPageEditor: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
-                if model.stage == .processed { filterStrip }
+                if model.stage == .processed && contentMode == .image { filterStrip }
                 if model.stage == .adjustments { adjustmentPanel }
                 Divider()
                 EditorNativeToolbar(layout: layout,
@@ -368,9 +432,10 @@ struct RecoveredPageEditor: View {
                     selected: selectedOperations, disabledOperations: unavailableOperations,
                     onOperation: handle)
                     .frame(height: 50)
-            }.background(Color(uiColor: .secondarySystemBackground))
+            }.background(ScannerAppearance.surface)
         }
-        .tint(.green)
+        .tint(ScannerAppearance.accent)
+        .preferredColorScheme(.light)
         .disabled(model.saving)
         .interactiveDismissDisabled(model.saving || model.hasChanges)
         .task {
@@ -381,7 +446,17 @@ struct RecoveredPageEditor: View {
             }
             model.load(page: page, folder: store.root.appendingPathComponent(documentID.uuidString))
         }
-        .onDisappear { model.stop() }
+        .task(id: thumbnailRecipe) {
+            guard let page = thumbnailRecipe, let source = model.source else {
+                thumbnails.reset()
+                return
+            }
+            thumbnails.render(source: source, page: page)
+        }
+        .onDisappear { model.stop(); thumbnails.reset() }
+        .onChange(of: model.stage) { stage in
+            if stage != .processed { contentMode = .image }
+        }
         .onChange(of: store.isBusy) { busy in
             if !busy && model.saving {
                 // Store clears isBusy before publishing its reload/completion.
@@ -415,14 +490,37 @@ struct RecoveredPageEditor: View {
         } message: { Text("As alteracoes deste editor serao descartadas. A fonte e preservada pelo armazenamento.") }
     }
     private var stageHeader: some View {
-        HStack {
-            Text(model.stage == .crop ? "1  RECORTE" : model.stage == .adjustments ? "AJUSTES" : "2  PREVIA")
-                .font(.caption.weight(.semibold)).tracking(1.5)
-            Spacer()
-            if model.saving { ProgressView().tint(.green); Text("Salvando...").font(.caption) }
-            else if model.work != nil { ProgressView().tint(.green); Text("Processando...").font(.caption) }
-            else { Text("No dispositivo").font(.caption) }
-        }.foregroundStyle(.white.opacity(0.8)).padding(.horizontal, 16).padding(.vertical, 12)
+        VStack(spacing: 8) {
+            if model.stage == .processed {
+                Picker("Conteudo da pagina", selection: $contentMode) {
+                    Text("Imagem").tag(ContentMode.image)
+                    Text("Texto").tag(ContentMode.text)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 224)
+                .accessibilityIdentifier("editor.content-mode")
+            }
+            if model.stage != .processed || model.saving || model.work != nil {
+                HStack(spacing: 8) {
+                    Text(model.stage == .crop ? "Recorte" : model.stage == .adjustments ? "Ajustes" : "Previa")
+                        .font(.caption.weight(.medium))
+                    Spacer()
+                    if model.saving {
+                        ProgressView().tint(ScannerAppearance.accent)
+                        Text("Salvando...").font(.caption)
+                    } else if model.work != nil {
+                        ProgressView().tint(ScannerAppearance.accent)
+                        Text("Processando...").font(.caption)
+                    } else {
+                        Text("No dispositivo").font(.caption)
+                    }
+                }
+            }
+        }
+        .foregroundStyle(ScannerAppearance.mutedInk)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .background(ScannerAppearance.surface)
     }
     private var imageArea: some View {
         GeometryReader { geometry in
@@ -432,7 +530,8 @@ struct RecoveredPageEditor: View {
                     inside: CGSize(width: max(1, geometry.size.width - 24), height: max(1, geometry.size.height - 100)))
                 VStack(spacing: 12) {
                     Text(model.hasOverlays ? "Marcacoes existentes: libere o recorte para mover os cantos." : "Arraste os quatro cantos. Avancar aplica a perspectiva.")
-                        .font(.caption).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center)
+                        .font(.caption).foregroundStyle(ScannerAppearance.mutedInk).multilineTextAlignment(.center)
+                        .padding(.horizontal, 16)
                     cropCanvas(source, size: size)
                     HStack {
                         Button("Cancelar recorte") { model.cancelCrop() }
@@ -443,23 +542,58 @@ struct RecoveredPageEditor: View {
                         }
                     }.font(.caption).disabled(model.controlsBlocked)
                 }.frame(width: geometry.size.width, height: geometry.size.height)
+            } else if model.stage == .processed && contentMode == .text {
+                transcriptArea.frame(width: geometry.size.width, height: geometry.size.height)
             } else if let preview = model.preview {
-                Image(uiImage: preview).resizable().scaledToFit().padding(12)
+                Image(uiImage: preview).resizable().scaledToFit().padding(8)
                     .opacity(model.previewReady ? 1 : 0.45)
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .accessibilityLabel(model.previewReady ? "Previa da pagina" : "Previa sendo atualizada")
                     .accessibilityIdentifier("editor.preview")
             } else {
                 VStack(spacing: 12) {
-                    if model.work != nil { ProgressView().tint(.green) }
+                    if model.work != nil { ProgressView().tint(ScannerAppearance.accent) }
                     Text(model.work != nil ? "Preparando imagem..." : "Previa indisponivel")
-                        .font(.footnote).foregroundStyle(.white.opacity(0.8))
+                        .font(.footnote).foregroundStyle(ScannerAppearance.mutedInk)
                     if model.work == nil && model.source != nil {
                         Button("Tentar previa novamente") { model.refreshPreview(debounced: false) }
                     }
                 }.frame(width: geometry.size.width, height: geometry.size.height)
             }
         }
+    }
+    private var transcriptArea: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                if transcript.isEmpty {
+                    Image(systemName: "text.viewfinder")
+                        .font(.system(size: 32, weight: .light))
+                        .foregroundStyle(ScannerAppearance.accent)
+                        .accessibilityHidden(true)
+                    Text("Texto da pagina").font(.headline)
+                    Text("Reconheca o texto para consultar e selecionar o conteudo desta pagina.")
+                        .font(.subheadline).foregroundStyle(ScannerAppearance.mutedInk)
+                } else {
+                    Text(transcript).font(.body).lineSpacing(6)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if let warning = model.draft?.ocrWarning {
+                    Text(warning).font(.caption).foregroundStyle(ScannerAppearance.mutedInk)
+                }
+                Button { model.recognize() } label: {
+                    Label(transcript.isEmpty ? "Reconhecer texto" : "Reconhecer novamente", systemImage: "text.viewfinder")
+                        .font(.subheadline.weight(.medium)).padding(.vertical, 8)
+                }
+                .disabled(!model.previewReady || model.controlsBlocked || store.isBusy)
+                .accessibilityIdentifier("editor.inline-ocr.recognize")
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(ScannerAppearance.surface)
+            .padding(8)
+        }
+        .accessibilityIdentifier("editor.inline-ocr")
     }
     private func cropCanvas(_ image: UIImage, size: CGSize) -> some View {
         let points = EditorGeometry.vertices(model.corners)
@@ -475,10 +609,10 @@ struct RecoveredPageEditor: View {
                     if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
                 }
                 path.closeSubpath()
-            }.stroke(EditorGeometry.isValid(model.corners) ? Color.green : Color.red, lineWidth: 2)
+            }.stroke(EditorGeometry.isValid(model.corners) ? ScannerAppearance.accent : Color.red, lineWidth: 2)
             ForEach(0..<4, id: \.self) { index in
                 let point = EditorGeometry.displayPoint(points[index], quarterTurns: model.turns)
-                Circle().fill(Color.green).frame(width: 18, height: 18)
+                Circle().fill(ScannerAppearance.accent).frame(width: 18, height: 18)
                     .overlay(Circle().stroke(Color.white, lineWidth: 2))
                     .frame(width: 44, height: 44).contentShape(Rectangle())
                     .position(x: point.x * size.width, y: point.y * size.height)
@@ -497,35 +631,56 @@ struct RecoveredPageEditor: View {
         .accessibilityIdentifier("editor.crop")
     }
     private var filterStrip: some View {
-        VStack(spacing: 3) {
+        VStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
+                HStack(spacing: 12) {
                     ForEach(EditorFilterCatalog.recoveredOrder) { filter in filterButton(filter) }
-                    Divider().frame(height: 34)
+                    Divider().frame(height: 72)
                     filterButton(.removeShadow)
-                }.padding(.horizontal, 12).padding(.vertical, 10)
+                }.padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 10)
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("editor.filters")
             if model.draft?.filter == .removeShadow {
                 Text("* Remocao de sombra independente; nao e o motor original.")
-                    .font(.caption2).foregroundStyle(.secondary).padding(.bottom, 5)
+                    .font(.caption2).foregroundStyle(ScannerAppearance.mutedInk)
+                    .padding(.horizontal, 12).padding(.bottom, 8)
             }
         }.disabled(model.controlsBlocked || store.isBusy)
     }
     private func filterButton(_ filter: PageFilter) -> some View {
         let selected = model.draft?.filter == filter
         return Button { model.setFilter(filter) } label: {
-            VStack(spacing: 5) {
-                Image(systemName: filter == .natural ? "photo" : "circle.lefthalf.filled")
-                    .font(.system(size: 21)).frame(height: 26)
-                Text(EditorFilterCatalog.title(filter)).font(.caption2)
+            VStack(spacing: 0) {
+                ZStack {
+                    ScannerAppearance.canvas
+                    // Never fall back to source or retain another geometry/overlay recipe.
+                    if thumbnails.page == thumbnailRecipe,
+                       let image = thumbnails.images[EditorFilterCatalog.nativeModeID(filter)] {
+                        Image(uiImage: image).resizable().scaledToFill()
+                            .frame(width: 72, height: 76).clipped()
+                    } else {
+                        Image(systemName: "photo").font(.system(size: 22, weight: .light))
+                            .foregroundStyle(ScannerAppearance.mutedInk)
+                    }
+                }
+                .frame(width: 72, height: 76)
+                .accessibilityHidden(true)
+                Text(EditorFilterCatalog.title(filter))
+                    .font(.caption2.weight(selected ? .semibold : .regular))
+                    .lineLimit(1).minimumScaleFactor(0.8)
+                    .frame(width: 72, height: 24)
+                    .foregroundStyle(selected ? Color.white : ScannerAppearance.mutedInk)
+                    .background(selected ? ScannerAppearance.accent : ScannerAppearance.surface)
             }
-            .frame(minWidth: 58).padding(.vertical, 5)
-            .foregroundStyle(selected ? Color.green : Color.primary)
-            .background(selected ? Color.green.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3)
+                .strokeBorder(selected ? ScannerAppearance.accent : ScannerAppearance.mutedInk.opacity(0.18),
+                              lineWidth: selected ? 2 : 1))
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(EditorFilterCatalog.title(filter))
         .accessibilityIdentifier("editor.filter.\(EditorFilterCatalog.nativeModeID(filter))")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
@@ -534,7 +689,7 @@ struct RecoveredPageEditor: View {
         let title = control == .contrast ? "Contraste" : control == .brightness ? "Brilho" : "Detalhe"
         return VStack(spacing: 4) {
             HStack { Text(title); Spacer(); Text("\(Int(model.adjustments.value(control)))").monospacedDigit() }
-                .font(.caption)
+                .font(.caption).foregroundStyle(ScannerAppearance.mutedInk)
             Slider(value: Binding(get: { model.adjustments.value(control) }, set: { model.adjust(to: $0) }),
                    in: EditorAdjustmentState.range(control), step: 1)
                 .accessibilityLabel(title).accessibilityIdentifier("editor.adjustment.slider")

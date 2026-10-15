@@ -7,8 +7,8 @@ struct FolhaApp: App {
     @StateObject private var store = DocumentStore()
     var body: some Scene {
         WindowGroup {
-            LibraryScreen().environmentObject(store)
-                .tint(Color(red: 0.08, green: 0.61, blue: 0.39))
+            ScannerHomeScreen().environmentObject(store)
+                .tint(ScannerAppearance.accent)
                 .overlay {
                     if store.isBusy {
                         ZStack {
