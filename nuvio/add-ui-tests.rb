@@ -11,6 +11,8 @@ raise 'Regression target already exists' if project.targets.any? { |t| t.name ==
 tests = project.new_target(:ui_test_bundle, 'NuvioRegressionUITests', :ios, '16.1')
 tests.add_dependency(app)
 tests.build_configurations.each do |config|
+  config.build_settings['PRODUCT_NAME'] = 'NuvioRegressionUITests'
+  config.build_settings['PRODUCT_MODULE_NAME'] = 'NuvioRegressionUITests'
   config.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] = 'com.valyc.nuvio.regression'
   config.build_settings['GENERATE_INFOPLIST_FILE'] = 'YES'
   config.build_settings['SWIFT_VERSION'] = '5.0'
