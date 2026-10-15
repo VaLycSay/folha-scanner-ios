@@ -1,0 +1,59 @@
+name: Private reference branding experiment
+on:
+  push:
+    branches: ['private-rebrand-*']
+    paths: ['private-rebrand/**', '.github/workflows/private-rebrand.yml']
+permissions:
+  contents: read
+concurrency:
+  group: private-rebrand-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  package:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Private static inspection and packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          PRIVATE_WORK="$RUNNER_TEMP/private-rebrand"
+          mkdir -p "$PRIVATE_WORK" sealed
+          export PRIVATE_WORK
+          {
+            curl --fail --location --retry 2 --connect-timeout 20 --max-time 240 \
+              'https://archive.org/download/camscanner_5.26.12_ios_15.0_1752915190/camscanner_5.26.12_ios_15.0.ipa' \
+              -o "$PRIVATE_WORK/source.ipa"
+            npm install --prefix "$PRIVATE_WORK/rea" --ignore-scripts --no-audit --no-fund rea-agents@6.5.0
+            export REA_CLI="$PRIVATE_WORK/rea/node_modules/rea-agents/scripts/rea.mjs"
+            swift private-rebrand/icon.swift "$PRIVATE_WORK/brand"
+            python3 private-rebrand/rebrand.py
+          } > "$PRIVATE_WORK/execution.log" 2>&1 && ok=true || ok=false
+          if [ "$ok" = true ]; then
+            node private-rebrand/seal.mjs seal "$PRIVATE_WORK/delivery.zip" private-rebrand/recipient-public.pem sealed/delivery
+            echo "Private package encrypted for the local recipient. No plaintext artifact uploaded."
+          else
+            node private-rebrand/seal.mjs seal "$PRIVATE_WORK/execution.log" private-rebrand/recipient-public.pem sealed/diagnostics
+            echo "Private packaging failed. Diagnostics encrypted for the local recipient."
+          fi
+          echo "$ok" > "$PRIVATE_WORK/job-ok"
+      - name: Upload encrypted files only
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-branding-encrypted
+          path: |
+            sealed/*.bin
+            sealed/*.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Report status
+        shell: bash
+        run: |
+          test "$(cat "$RUNNER_TEMP/private-rebrand/job-ok")" = true
