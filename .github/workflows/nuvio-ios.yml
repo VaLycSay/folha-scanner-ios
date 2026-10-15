@@ -20,12 +20,8 @@ jobs:
         with:
           path: harness
           persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          repository: NuvioMedia/NuvioMobile
-          ref: 6d435785c0e082ae3d4fbb8152e1ff5e45c2e575
-          path: upstream
-          persist-credentials: false
+      - name: Obtain fixed official source archive
+        run: python3 harness/nuvio/fetch-source.py upstream
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -70,13 +66,8 @@ jobs:
         with:
           path: harness
           persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          repository: NuvioMedia/NuvioMobile
-          ref: 6d435785c0e082ae3d4fbb8152e1ff5e45c2e575
-          path: upstream
-          submodules: true
-          persist-credentials: false
+      - name: Obtain fixed official source and iOS submodule archives
+        run: python3 harness/nuvio/fetch-source.py upstream --ios
       - uses: actions/setup-node@v4
         with:
           node-version: 22
