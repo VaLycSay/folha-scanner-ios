@@ -51,6 +51,8 @@ private final class EditorViewModel: ObservableObject {
     @Published private(set) var recognizedText = ""
     private var folder: URL?
     private var cropSnapshot: ScanPage?
+    private var cropTextSnapshot = ""
+    private var cropReturnsToProcessed = false
     private var adjustmentSnapshot: ScanPage?
     private var adjustmentTextSnapshot = ""
     private var versions = EditorPreviewRevision()
@@ -58,6 +60,9 @@ private final class EditorViewModel: ObservableObject {
     private var active = false
 
     var hasChanges: Bool { draft != original }
+    var backAction: EditorBackAction {
+        EditorPresentation.backAction(stage: stage, cropReturnsToProcessed: cropReturnsToProcessed)
+    }
     var hasOverlays: Bool { !(draft?.overlays ?? []).isEmpty }
     var hasOCR: Bool { !(draft?.lines ?? []).isEmpty || !(original?.lines ?? []).isEmpty || !recognizedText.isEmpty }
     var controlsBlocked: Bool { saving || work == .loading || work == .borders || work == .ocr }
@@ -188,6 +193,8 @@ private final class EditorViewModel: ObservableObject {
         switch change {
         case .crop:
             cropSnapshot = draft // BEFORE the explicitly approved overlay removal.
+            cropTextSnapshot = recognizedText
+            cropReturnsToProcessed = true
             stage = .crop
         case .unlockCrop:
             if cropSnapshot == nil { cropSnapshot = draft }
@@ -241,6 +248,8 @@ private final class EditorViewModel: ObservableObject {
         draft?.corners = selected
         draft?.autoCrop = true
         cropSnapshot = nil
+        cropTextSnapshot = ""
+        cropReturnsToProcessed = false
         stage = .processed
         invalidateText()
         refreshPreview(debounced: false)
@@ -250,8 +259,10 @@ private final class EditorViewModel: ObservableObject {
         draft = snapshot
         adjustments = EditorAdjustmentState(snapshot.reconstructedAdjustments)
         cropSnapshot = nil
+        cropReturnsToProcessed = false
         stage = .processed
-        recognizedText = ""
+        recognizedText = cropTextSnapshot
+        cropTextSnapshot = ""
         refreshPreview(debounced: false)
     }
     func openOverlay(_ mode: EditorSheet) {
@@ -402,12 +413,20 @@ struct RecoveredPageEditor: View {
         .navigationBarBackButtonHidden(true)
         .toolbarBackground(ScannerAppearance.surface, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        .toolbarColorScheme(.light, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 Button("Cancelar") {
-                    if model.hasChanges { discardRequested = true } else { dismiss() }
-                }.disabled(model.saving).accessibilityIdentifier("editor.cancel")
+                    switch model.backAction {
+                    case .cancelCrop: model.cancelCrop()
+                    case .cancelAdjustments: model.finishAdjustments(confirm: false)
+                    case .leaveEditor:
+                        if model.hasChanges { discardRequested = true } else { dismiss() }
+                    }
+                }
+                .disabled(model.controlsBlocked || store.isBusy)
+                .accessibilityIdentifier("editor.cancel")
+                .accessibilityHint(model.backAction == .leaveEditor
+                    ? "Sair da edicao desta pagina" : "Desfazer esta etapa e voltar a previa")
             }
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 if model.stage == .processed {
@@ -435,7 +454,6 @@ struct RecoveredPageEditor: View {
             }.background(ScannerAppearance.surface)
         }
         .tint(ScannerAppearance.accent)
-        .preferredColorScheme(.light)
         .disabled(model.saving)
         .interactiveDismissDisabled(model.saving || model.hasChanges)
         .task {
@@ -632,15 +650,29 @@ struct RecoveredPageEditor: View {
     }
     private var filterStrip: some View {
         VStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    ForEach(EditorFilterCatalog.recoveredOrder) { filter in filterButton(filter) }
-                    Divider().frame(height: 72)
-                    filterButton(.removeShadow)
-                }.padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 10)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(EditorFilterCatalog.recoveredOrder) { filter in filterButton(filter) }
+                        Divider().frame(height: 72)
+                        filterButton(.removeShadow)
+                    }.padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 10)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("editor.filters")
+                .onAppear {
+                    if let filter = model.draft?.filter {
+                        proxy.scrollTo(EditorFilterCatalog.nativeModeID(filter), anchor: .center)
+                    }
+                }
+                .onChange(of: model.draft?.filter) { filter in
+                    if let filter {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo(EditorFilterCatalog.nativeModeID(filter), anchor: .center)
+                        }
+                    }
+                }
             }
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("editor.filters")
             if model.draft?.filter == .removeShadow {
                 Text("* Remocao de sombra independente; nao e o motor original.")
                     .font(.caption2).foregroundStyle(ScannerAppearance.mutedInk)
@@ -666,7 +698,7 @@ struct RecoveredPageEditor: View {
                 }
                 .frame(width: 72, height: 76)
                 .accessibilityHidden(true)
-                Text(EditorFilterCatalog.title(filter))
+                Text(EditorPresentation.filterTitle(filter))
                     .font(.caption2.weight(selected ? .semibold : .regular))
                     .lineLimit(1).minimumScaleFactor(0.8)
                     .frame(width: 72, height: 24)
@@ -678,9 +710,10 @@ struct RecoveredPageEditor: View {
                 .strokeBorder(selected ? ScannerAppearance.accent : ScannerAppearance.mutedInk.opacity(0.18),
                               lineWidth: selected ? 2 : 1))
         }
+        .id(EditorFilterCatalog.nativeModeID(filter))
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(EditorFilterCatalog.title(filter))
+        .accessibilityLabel(EditorPresentation.filterTitle(filter))
         .accessibilityIdentifier("editor.filter.\(EditorFilterCatalog.nativeModeID(filter))")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }

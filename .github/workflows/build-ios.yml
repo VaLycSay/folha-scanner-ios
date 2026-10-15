@@ -41,8 +41,10 @@ jobs:
             reports/screenshots/*.png
             reports/screenshots/*.txt
             reports/screenshots/*.json
+            reports/screenshots/*.mp4
             reports/screenshots-retry/*.png
             reports/screenshots-retry/*.txt
             reports/screenshots-retry/*.json
+            reports/screenshots-retry/*.mp4
           if-no-files-found: ignore
           retention-days: 7

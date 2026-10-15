@@ -128,7 +128,7 @@ public final class RecoveredEditorToolbar: UIView {
         appearance.contentInsets = .zero
         appearance.titleAlignment = .center
         appearance.titleLineBreakMode = .byTruncatingTail
-        let iconColor = selected.contains(operation) ? accent : UIColor(white: 0.12, alpha: 1)
+        let iconColor = selected.contains(operation) ? accent : UIColor.label
         let titleColor = selected.contains(operation) ? accent : mutedInk
         // Explicit transformers keep the bridge's legacy tint from recoloring
         // captions or selected controls, and still distinguish disabled actions.

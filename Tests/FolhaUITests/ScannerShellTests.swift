@@ -49,4 +49,40 @@ final class ScannerShellTests: XCTestCase {
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "REA-v04-export-panel"; shot.lifetime = .keepAlways; add(shot)
     }
+
+    @MainActor
+    func testFilesSelectionSurvivesLayoutChangeWithoutOpeningDocument() {
+        let app = launch()
+        defer { app.terminate() }
+        let row = app.buttons["library.document"].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 40))
+        app.buttons["library.tab.Arquivos"].tap()
+        let layout = app.buttons["library.layout"]
+        XCTAssertTrue(layout.waitForExistence(timeout: 20))
+        app.buttons["library.selectAll"].tap()
+        XCTAssertEqual(app.staticTexts["library.selection.count"].label, "1 selecionados")
+        layout.tap()
+        let selected = app.buttons["library.select"].firstMatch
+        XCTAssertEqual(selected.value as? String, "Selecionado")
+        selected.tap()
+        XCTAssertEqual(app.staticTexts["library.selection.count"].label, "0 selecionados")
+        XCTAssertFalse(app.buttons["library.selection.share"].isEnabled)
+        app.buttons["library.document"].firstMatch.tap()
+        XCTAssertEqual(app.staticTexts["library.selection.count"].label, "1 selecionados")
+        app.buttons["library.selection.cancel"].tap()
+        app.buttons["library.document"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["document.share"].waitForExistence(timeout: 20))
+    }
+
+    @MainActor
+    func testRecentShareOpensActualExportPanel() {
+        let app = launch()
+        defer { app.terminate() }
+        let share = app.buttons["library.recent.share"]
+        XCTAssertTrue(share.waitForExistence(timeout: 40))
+        share.tap()
+        for format in ["PDF", "JPG", "TXT"] {
+            XCTAssertTrue(app.buttons["export.\(format)"].waitForExistence(timeout: 20))
+        }
+    }
 }

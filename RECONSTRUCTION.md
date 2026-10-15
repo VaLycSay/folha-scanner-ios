@@ -29,12 +29,29 @@ decompilation and private analysis are NOT in this repository.
 
 Six primary filters and the processed toolbar order follow recovered contracts.
 Some fonts, colors, capture controls and image effects are independent choices.
-The original application was not executed for runtime or pixel comparison.
+The original application was not executed by the build runner for runtime or
+pixel comparison. A user-supplied recording of the current app additionally
+guides the Home, Files, Tools and camera layout; it does not show the full editor.
 The official 7.27.0 IPA has an encrypted main executable. Its REA resource
 evidence is not a recovery of its current native implementation. Official
 marketing images informed layout, but some contain visibly older sample dates
 and do not establish the exact current runtime interface. Full equivalence
 remains unproven; the 128-case kernel fixture is limited to historical contracts.
+
+## White-label fidelity pass
+
+WHITE-LABEL-SPEC.md separates observed appearance, actual workflows and verified
+results. This pass adds compact quick tools, contextual Recent actions, Files
+selection in list/grid, grouped tools and adaptive editor presentation. Reopened
+crop cancellation restores the previous recipe and recognized text. Branding
+remains Scanner REA, with our own code and artwork; this is not an official
+CamScanner white-label distribution or a modified original executable.
+
+The current IPA was also projected through REA's Apple application inventory.
+Private asset-catalog metadata and Interface Builder properties guide further
+comparison. These static facts do not establish runtime pixel equivalence or
+recover the encrypted implementation. Missing proprietary features remain
+explicitly listed below, regardless of a successful build or test count.
 
 ## Build and verification
 

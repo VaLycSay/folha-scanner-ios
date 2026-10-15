@@ -61,9 +61,11 @@ struct ScannerHomeScreen: View {
     @State private var grid = false
     @State private var alphabetical = false
     @State private var selected: Set<UUID> = []
+    @State private var selecting = false
     @State private var tool: HomeTool?
     @State private var textDestination: UUID?
     @State private var share: ExportFileSet?
+    @State private var exportingDocument: ScanDocument?
 
     private var documents: [ScanDocument] {
         let matches = store.documents.filter {
@@ -81,20 +83,21 @@ struct ScannerHomeScreen: View {
                 else {
                     searchField
                     ScrollView {
-                        VStack(spacing: 24) {
-                            if tab == .home || tab == .tools { toolGrid }
+                        VStack(spacing: 18) {
+                            if tab == .home { toolGrid.padding(.horizontal, 16) }
+                            if tab == .files { fileShortcuts.padding(.horizontal, 16) }
+                            if tab == .tools { toolCatalog.padding(.horizontal, 16) }
                             if tab != .tools { documentLibrary }
-                            else { Text("Abra um documento para editar paginas, assinar ou compartilhar.").font(.footnote).foregroundStyle(.secondary) }
                             if !store.storageWarnings.isEmpty {
                                 VStack(alignment: .leading, spacing: 8) {
                                     Label("Documentos preservados: revisar", systemImage: "exclamationmark.triangle")
                                     ForEach(store.storageWarnings, id: \.self) { Text($0).font(.caption) }
                                 }.foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
                             }
-                        }.padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 24)
+                        }.padding(.top, 16).padding(.bottom, 24)
                     }.scrollDismissesKeyboard(.interactively).accessibilityIdentifier("library.screen")
                 }
-            }.background(ScannerAppearance.surface)
+            }.background(ScannerAppearance.homeBackground)
                 .navigationTitle("Documentos").navigationBarTitleDisplayMode(.inline)
                 .toolbar(.hidden, for: .navigationBar)
                 .safeAreaInset(edge: .bottom, spacing: 0) { if path.isEmpty { bottomBar } }
@@ -126,6 +129,8 @@ struct ScannerHomeScreen: View {
                 }
                 .sheet(item: $tool) { chosen in toolChooser(chosen) }
                 .sheet(item: $share) { ScannerActivitySheet(urls: $0.urls) }
+                .sheet(item: $exportingDocument) { ScannerExportSheet(document: $0).environmentObject(store) }
+                .onChange(of: search) { _, _ in selected.removeAll(); selecting = false }
                 .disabled(working || store.isBusy)
                 .overlay { if working { ScannerProgress(message: "Preparando arquivos...") } }
         }
@@ -139,18 +144,22 @@ struct ScannerHomeScreen: View {
                 Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
                     .accessibilityLabel("Limpar pesquisa")
             }
-        }.padding(.horizontal, 13).frame(height: 42)
-            .background(ScannerAppearance.canvas, in: RoundedRectangle(cornerRadius: 11))
-            .padding(.horizontal, 20).padding(.top, 10)
+        }.padding(.horizontal, 13).frame(height: 36)
+            .background(ScannerAppearance.librarySurface, in: RoundedRectangle(cornerRadius: 9))
+            .padding(.horizontal, 16).padding(.top, 8)
     }
 
     private var toolGrid: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 22) {
-            ForEach(HomeTool.allCases) { item in
+        toolButtons(HomeTool.allCases)
+    }
+
+    private func toolButtons(_ items: [HomeTool]) -> some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 16) {
+            ForEach(items) { item in
                 Button { activate(item) } label: {
                     VStack(spacing: 8) {
-                        Image(systemName: item.symbol).font(.system(size: 23, weight: .medium))
-                            .foregroundStyle(item.color).frame(width: 49, height: 49)
+                        Image(systemName: item.symbol).font(.system(size: 22, weight: .medium))
+                            .foregroundStyle(item.color).frame(width: 45, height: 45)
                             .background(item.color.opacity(0.07), in: Circle())
                         Text(item.displayTitle).font(.system(size: 11, weight: .medium)).foregroundStyle(.primary)
                             .multilineTextAlignment(.center).lineLimit(2).frame(height: 28, alignment: .top)
@@ -160,15 +169,43 @@ struct ScannerHomeScreen: View {
         }
     }
 
+    private var toolCatalog: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Text("Ferramentas").font(.title2.weight(.semibold))
+            Text("Digitalizar e importar").font(.subheadline.weight(.semibold))
+            toolButtons([.scan, .files, .photos])
+            Text("Editar").font(.subheadline.weight(.semibold))
+            toolButtons([.signature, .filters, .text])
+            Text("Exportar").font(.subheadline.weight(.semibold))
+            toolButtons([.pdf])
+            Text("Escolha um documento e abra a pagina para assinar ou ajustar os filtros.")
+                .font(.footnote).foregroundStyle(.secondary)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var fileShortcuts: some View {
+        HStack(spacing: 10) {
+            ForEach([HomeTool.files, .photos]) { item in
+                Button { activate(item) } label: {
+                    VStack(spacing: 10) {
+                        Image(systemName: item.symbol).font(.system(size: 25)).foregroundStyle(item.color)
+                        Text(item.displayTitle).font(.caption).foregroundStyle(.primary)
+                    }.frame(maxWidth: .infinity).frame(height: 88)
+                        .background(ScannerAppearance.librarySurface, in: RoundedRectangle(cornerRadius: 9))
+                }.buttonStyle(.plain).accessibilityIdentifier("files.import.\(item.id)")
+            }
+        }
+    }
+
     private var documentLibrary: some View {
         VStack(spacing: 16) {
             HStack {
-                Text(tab == .home ? "Recentes" : "Todos os documentos").font(.system(size: 17, weight: .medium))
+                Text(tab == .home ? "Recentes" : "Tudo (\(documents.count))").font(.system(size: 17, weight: .medium))
                 Spacer()
                 if tab == .home {
                     Button { tab = .files } label: {
                         HStack(spacing: 4) { Text("Exibir tudo"); Image(systemName: "chevron.right") }.font(.caption)
-                    }
+                    }.foregroundStyle(.secondary)
                 } else {
                     Menu {
                         Button("Mais recentes", systemImage: "clock") { alphabetical = false }
@@ -176,6 +213,12 @@ struct ScannerHomeScreen: View {
                     } label: { Image(systemName: "arrow.up.arrow.down") }.accessibilityLabel("Ordenar documentos")
                     Button { grid.toggle() } label: { Image(systemName: grid ? "list.bullet" : "square.grid.2x2") }
                         .accessibilityLabel("Alternar lista e grade").padding(.leading, 8)
+                        .accessibilityIdentifier("library.layout")
+                    Button { selecting = true; selected = Set(documents.map(\.id)) } label: {
+                        Image(systemName: "checkmark.square")
+                    }.accessibilityLabel("Selecionar todos os documentos")
+                        .accessibilityIdentifier("library.selectAll").frame(width: 44, height: 44)
+                        .disabled(documents.isEmpty)
                 }
             }
             if documents.isEmpty {
@@ -187,7 +230,7 @@ struct ScannerHomeScreen: View {
             } else if grid && tab == .files {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 18) {
                     ForEach(documents) { document in
-                        NavigationLink(value: document.id) {
+                        Button { openDocument(document) } label: {
                             VStack(alignment: .leading, spacing: 10) {
                                 ScannerThumbnail(document: document, width: 115, height: 152).frame(maxWidth: .infinity)
                                 Text(document.title).font(.subheadline.weight(.medium)).lineLimit(2)
@@ -195,13 +238,14 @@ struct ScannerHomeScreen: View {
                             }.foregroundStyle(.primary).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(ScannerAppearance.canvas, in: RoundedRectangle(cornerRadius: 10))
                         }.buttonStyle(.plain).accessibilityIdentifier("library.document")
+                            .overlay(alignment: .topTrailing) { selectionButton(document).padding(4) }
                     }
                 }
             } else {
                 LazyVStack(spacing: 0) {
                     ForEach(documents) { document in
                         HStack(spacing: 12) {
-                            NavigationLink(value: document.id) {
+                            Button { openDocument(document) } label: {
                                 HStack(spacing: 13) {
                                     ScannerThumbnail(document: document)
                                     VStack(alignment: .leading, spacing: 8) {
@@ -213,31 +257,63 @@ struct ScannerHomeScreen: View {
                                     }.frame(maxWidth: .infinity, alignment: .leading)
                                 }.foregroundStyle(.primary).contentShape(Rectangle())
                             }.buttonStyle(.plain).accessibilityIdentifier("library.document")
-                            Button {
-                                if selected.contains(document.id) { selected.remove(document.id) } else { selected.insert(document.id) }
-                            } label: {
-                                Image(systemName: selected.contains(document.id) ? "checkmark.square.fill" : "square")
-                                    .font(.system(size: 19, weight: .light))
-                                    .foregroundStyle(selected.contains(document.id) ? ScannerAppearance.accent : Color(.tertiaryLabel))
-                                    .frame(width: 34, height: 44)
-                            }.buttonStyle(.plain).accessibilityLabel("Selecionar \(document.title)").accessibilityIdentifier("library.select")
+                            selectionButton(document)
                         }.padding(.vertical, 12)
+                        if tab == .home && documents.first?.id == document.id && !selecting {
+                            HStack(spacing: 8) {
+                                recentAction("Compartilhar", identifier: "library.recent.share") { exportingDocument = document }
+                                recentAction("Visualizar", identifier: "library.recent.open") { openDocument(document) }
+                            }.padding(.bottom, 12)
+                        }
                         Divider().padding(.leading, 69)
                     }
                 }
             }
-        }
+        }.padding(.horizontal, 16).padding(.vertical, 14)
+            .background(ScannerAppearance.librarySurface)
+    }
+
+    private func recentAction(_ title: String, identifier: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.system(size: 12)).foregroundStyle(.primary)
+                .frame(maxWidth: .infinity).frame(minHeight: 36)
+                .background(ScannerAppearance.actionSurface, in: RoundedRectangle(cornerRadius: 4))
+        }.buttonStyle(.plain).accessibilityIdentifier(identifier)
+    }
+
+    private func selectionButton(_ document: ScanDocument) -> some View {
+        Button { toggleSelection(document.id) } label: {
+            Image(systemName: selected.contains(document.id) ? "checkmark.square.fill" : "square")
+                .font(.system(size: 19, weight: .light))
+                .foregroundStyle(selected.contains(document.id) ? ScannerAppearance.accent : Color(.tertiaryLabel))
+                .frame(width: 44, height: 44).contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityLabel("Selecionar \(document.title)")
+            .accessibilityValue(selected.contains(document.id) ? "Selecionado" : "Nao selecionado")
+            .accessibilityIdentifier("library.select")
+    }
+
+    private func toggleSelection(_ id: UUID) {
+        selecting = true
+        if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
+    }
+
+    private func openDocument(_ document: ScanDocument) {
+        if selecting { toggleSelection(document.id) }
+        else { textDestination = nil; path.append(document.id) }
     }
 
     private var bottomBar: some View {
         VStack(spacing: 0) {
-            if !selected.isEmpty {
+            if selecting {
                 HStack {
-                    Button("Cancelar") { selected.removeAll() }
+                    Button("Cancelar") { selected.removeAll(); selecting = false }
+                        .accessibilityIdentifier("library.selection.cancel")
                     Spacer()
                     Text("\(selected.count) selecionados").font(.caption)
+                        .accessibilityIdentifier("library.selection.count")
                     Spacer()
                     Button { shareSelected() } label: { Image(systemName: "square.and.arrow.up") }.accessibilityLabel("Compartilhar PDFs selecionados")
+                        .disabled(selected.isEmpty).accessibilityIdentifier("library.selection.share")
                 }.padding(.horizontal, 22).frame(height: 62)
             } else {
                 HStack(spacing: 0) {
@@ -258,13 +334,14 @@ struct ScannerHomeScreen: View {
     }
 
     private func tabButton(_ item: HomeTab) -> some View {
-        Button { tab = item; selected.removeAll() } label: {
+        Button { tab = item; selected.removeAll(); selecting = false } label: {
             VStack(spacing: 5) {
                 Image(systemName: item.symbol).font(.system(size: 18))
                 Text(item == .files ? "Documentos" : item.rawValue).font(.system(size: 10)).lineLimit(1).minimumScaleFactor(0.8)
             }
                 .foregroundStyle(tab == item ? ScannerAppearance.accent : ScannerAppearance.mutedInk)
                 .frame(maxWidth: .infinity).frame(height: 55)
+                .background(tab == item ? ScannerAppearance.librarySurface : .clear, in: Capsule())
         }.buttonStyle(.plain).accessibilityIdentifier("library.tab.\(item.rawValue)")
     }
 

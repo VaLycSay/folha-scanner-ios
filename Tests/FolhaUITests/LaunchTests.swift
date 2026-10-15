@@ -203,7 +203,28 @@ final class LaunchTests: XCTestCase {
             XCTFail("Expected exactly one Select All action in the rename edit menu.")
             throw FlowFailure.transition("ambiguous rename selection")
         }
-        try tap(actions.firstMatch, app: app)
+        // Run 38741490763 proved that element.tap() invokes XCTest's default
+        // interruption handler here: it dismisses our rename alert underneath
+        // the edit menu. Dispatch once at the actual menu item's observed frame,
+        // not at a guessed field position, and retain all rename assertions.
+        let action = actions.firstMatch
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"),
+            object: action)
+        guard XCTWaiter.wait(for: [ready], timeout: 10) == .completed else {
+            XCTFail("The unique Select All action must be interactable.")
+            throw FlowFailure.transition("rename selection readiness")
+        }
+        let frame = try action.snapshot().frame
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        guard !frame.isEmpty, app.frame.contains(point), app.alerts.count == 1 else {
+            XCTFail("Select All must have on-screen geometry over the rename alert.")
+            throw FlowFailure.transition("rename selection geometry")
+        }
+        capture("rename-before-select-all", app: app)
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: point.x - app.frame.minX, dy: point.y - app.frame.minY)).tap()
+        XCTAssertTrue(app.alerts.firstMatch.exists, "Selecting text must not dismiss the rename dialog.")
         field.typeText(XCUIKeyboardKey.delete.rawValue)
         // The caller must still assert an empty value (or the native placeholder)
         // and the exact replacement before saving and reopening the document.
