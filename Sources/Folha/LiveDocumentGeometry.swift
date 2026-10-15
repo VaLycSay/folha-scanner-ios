@@ -86,6 +86,22 @@ struct LiveDocumentTrackingState: Equatable {
     let awaitingClear: Bool
 }
 
+// The smoothed overlay may still be inside the preview after the live page
+// moves out. Both projections must independently satisfy the framing gate.
+enum LiveDocumentCaptureGate {
+    static func isFramed(current: [CGPoint], smoothed: [CGPoint],
+                         inside bounds: CGRect, margin: CGFloat = 10) -> Bool {
+        guard bounds.width.isFinite, bounds.height.isFinite, bounds.minX.isFinite,
+              bounds.minY.isFinite, margin.isFinite, margin >= 0,
+              bounds.width > 2 * margin, bounds.height > 2 * margin else { return false }
+        let safe = bounds.insetBy(dx: margin, dy: margin)
+        func contained(_ points: [CGPoint]) -> Bool {
+            points.count == 4 && points.allSatisfy { $0.x.isFinite && $0.y.isFinite && safe.contains($0) }
+        }
+        return contained(current) && contained(smoothed)
+    }
+}
+
 /// Pure state machine; its owner serializes updates (the camera uses the main thread).
 /// Feed nil only for an actual completed detection with no document, never a paused
 /// detector, skipped frame or inference error. Invalid geometry is not proof of removal.

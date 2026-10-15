@@ -6,8 +6,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: scanner-rea-build
-  cancel-in-progress: false
+  group: scanner-rea-build-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: macos-26

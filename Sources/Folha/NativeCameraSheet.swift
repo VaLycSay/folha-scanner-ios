@@ -601,7 +601,10 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
             return
         }
         let state = documentTracker.update(quad, at: CACurrentMediaTime())
-        let fits = state.quad.map(documentFitsPreview) ?? false
+        let fits = LiveDocumentCaptureGate.isFramed(
+            current: quad.map(previewPoints) ?? [],
+            smoothed: state.quad.map(previewPoints) ?? [],
+            inside: previewContainer.bounds)
         drawDocument(state.quad, stable: state.stable && fits)
         shutter.readinessProgress = autoCaptureEnabled && fits && !state.awaitingClear ? CGFloat(state.progress) : 0
         if autoCaptureEnabled && state.awaitingClear {
@@ -624,12 +627,6 @@ final class ScannerCaptureController: UIViewController, AVCapturePhotoCaptureDel
         guard let preview else { return [] }
         return quad.points.map { preview.layerPointConverted(fromCaptureDevicePoint:
             LiveDocumentQuad.captureDevicePoint(fromPortraitVision: $0)) }
-    }
-
-    private func documentFitsPreview(_ quad: LiveDocumentQuad) -> Bool {
-        let points = previewPoints(quad)
-        let inset = previewContainer.bounds.insetBy(dx: 10, dy: 10)
-        return points.count == 4 && points.allSatisfy { inset.contains($0) }
     }
 
     private func drawDocument(_ quad: LiveDocumentQuad?, stable: Bool) {
