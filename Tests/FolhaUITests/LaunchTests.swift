@@ -202,7 +202,17 @@ final class LaunchTests: XCTestCase {
         }
 
         capture("system-keyboard-introduction-before-dismissal", app: app)
-        continueButton.tap() // One bounded attempt, confined to the verified system container.
+        // XCTest interruption handling can dismiss this transient system view
+        // after resolving an element-based tap. Use its observed on-screen
+        // frame once, so that event dispatch does not re-resolve a stale button.
+        if !introduction.exists { return }
+        let frame = continueButton.frame
+        guard !frame.isEmpty, app.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) else {
+            XCTFail("Keyboard Continue has no usable on-screen frame.")
+            throw FlowFailure.transition("keyboard Continue geometry")
+        }
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: frame.midX - app.frame.minX, dy: frame.midY - app.frame.minY)).tap()
         let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
                                                   object: introduction)
         guard XCTWaiter.wait(for: [dismissed], timeout: 5) == .completed else {
