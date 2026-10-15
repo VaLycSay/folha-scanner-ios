@@ -333,10 +333,14 @@ struct RecoveredPageEditor: View {
             }
         }
         .background(Color(white: 0.07))
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("editor.screen")
         .navigationTitle(model.stage == .crop ? "Recortar pagina" : "Editar pagina")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
+        .toolbarBackground(Color(white: 0.07), for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 Button("Cancelar") {
@@ -489,6 +493,7 @@ struct RecoveredPageEditor: View {
         }
         .frame(width: size.width, height: size.height)
         .coordinateSpace(name: "editor-crop")
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("editor.crop")
     }
     private var filterStrip: some View {
@@ -499,7 +504,9 @@ struct RecoveredPageEditor: View {
                     Divider().frame(height: 34)
                     filterButton(.removeShadow)
                 }.padding(.horizontal, 12).padding(.vertical, 10)
-            }.accessibilityIdentifier("editor.filters")
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("editor.filters")
             if model.draft?.filter == .removeShadow {
                 Text("* Remocao de sombra independente; nao e o motor original.")
                     .font(.caption2).foregroundStyle(.secondary).padding(.bottom, 5)
@@ -531,7 +538,10 @@ struct RecoveredPageEditor: View {
             Slider(value: Binding(get: { model.adjustments.value(control) }, set: { model.adjust(to: $0) }),
                    in: EditorAdjustmentState.range(control), step: 1)
                 .accessibilityLabel(title).accessibilityIdentifier("editor.adjustment.slider")
-        }.padding(.horizontal, 20).padding(.vertical, 10).accessibilityIdentifier("editor.adjustments")
+        }
+        .padding(.horizontal, 20).padding(.vertical, 10)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("editor.adjustments")
     }
     private func handle(_ operation: Contract.Operation) {
         guard !model.controlsBlocked && !store.isBusy else { return }

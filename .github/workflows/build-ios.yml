@@ -35,6 +35,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Scanner-REA-tests
-          path: reports/
+          path: |
+            reports/*.log
+            reports/*.json
+            reports/screenshots/*.png
+            reports/screenshots/*.txt
+            reports/screenshots/*.json
+            reports/screenshots-retry/*.png
+            reports/screenshots-retry/*.txt
+            reports/screenshots-retry/*.json
           if-no-files-found: ignore
           retention-days: 7

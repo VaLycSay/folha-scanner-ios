@@ -51,8 +51,9 @@ final class ProcessingRegressionTests: XCTestCase {
             guard let context = CGContext(data: buffer.baseAddress, width: cg.width, height: cg.height,
                 bitsPerComponent: 8, bytesPerRow: cg.width * 4, space: CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-            context.translateBy(x: 0, y: CGFloat(cg.height))
-            context.scaleBy(x: 1, y: -1)
+            // Copy CGImage scanlines with the identity transform. A UIKit-style
+            // y flip here reverses the buffer rows, making top-left assertions
+            // inspect the bottom of the image instead of the rendered overlay.
             context.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
             return true
         }
@@ -79,6 +80,25 @@ final class ProcessingRegressionTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testRGBAReaderPreservesKnownScanlineOrderAndChannels() throws {
+        // An asymmetric raw fixture, independent of ScanEngine and UIKit drawing,
+        // calibrates the pixel reader before trusting raster/redaction assertions.
+        let expected: [UInt8] = [
+            255, 0, 0, 255,     0, 255, 0, 255,
+            0, 0, 255, 255,     255, 255, 0, 255,
+            0, 0, 0, 255,       255, 255, 255, 255
+        ]
+        let provider = try XCTUnwrap(CGDataProvider(data: Data(expected) as CFData))
+        let flags = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        let cg = try XCTUnwrap(CGImage(width: 2, height: 3, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: 8, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: flags),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        let pixels = try Self.rgba(UIImage(cgImage: cg))
+        XCTAssertEqual(pixels.width, 2)
+        XCTAssertEqual(pixels.height, 3)
+        XCTAssertEqual(pixels.bytes, expected)
     }
 
     func testLegacyManifestWithoutOptionalFieldsAndOldFilterValuesDecodes() throws {
@@ -218,12 +238,15 @@ final class ProcessingRegressionTests: XCTestCase {
                 var page = Self.page()
                 page.filter = filter
                 page.reconstructedAdjustments = .init(brightness: 40, contrast: -20, detail: 75)
+                let baseline = try Self.rgba(ScanEngine.process(source, page: &page))
                 page.overlays = [mask, PageOverlay(kind: .text, text: "SHOULD ALSO BE MASKED", x: 0, y: 0.02, width: 1, height: 0.1)]
                 let rendered = try ScanEngine.process(source, page: &page)
                 try Self.assertBlack(rendered, normalized: CGRect(x: 0, y: 0, width: 1, height: 0.25))
                 let pixels = try Self.rgba(rendered)
                 let bottom = (800 * pixels.width + 400) * 4
-                XCTAssertTrue(pixels.bytes[bottom...bottom + 2].contains { $0 > 0 })
+                // P&B can legitimately make this unmasked source pixel black.
+                // It must remain identical to the same filter without overlays.
+                XCTAssertEqual(Array(pixels.bytes[bottom..<bottom + 4]), Array(baseline.bytes[bottom..<bottom + 4]))
             }
         }.value
     }

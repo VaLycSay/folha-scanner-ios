@@ -55,7 +55,7 @@ final class LaunchTests: XCTestCase {
         XCTAssertEqual(try sliderValues(app), before)
         try tap("editor.cancel-adjustments", app: app)
         try returnToDocument(app)
-        try openFirstPage(app)
+        try openFirstPage(app, expectingInitialCrop: false)
         try tap("editor.adjustments", app: app)
         XCTAssertEqual(try sliderValues(app), before, "Cancelled values must not survive reopening the page.")
         record("cancel-values", text: "Before: \(before)\nReopened: \(try sliderValues(app))")
@@ -83,7 +83,7 @@ final class LaunchTests: XCTestCase {
         try waitForSaveToSettle(app)
         capture("editor-after-save", app: app)
         try returnToDocument(app)
-        try openFirstPage(app)
+        try openFirstPage(app, expectingInitialCrop: false)
         try tap("editor.adjustments", app: app)
         XCTAssertEqual(try sliderValues(app), changed, "The saved edit must survive recreating the page editor.")
         record("saved-values", text: "Before: \(before)\nCommitted: \(changed)\nReopened: \(try sliderValues(app))")
@@ -125,11 +125,12 @@ final class LaunchTests: XCTestCase {
         defer { app.terminate() }
         try openSeededDocument(app)
         try tap("document.rename", app: app)
-        let field = try require("document.renameField", app: app)
+        let field = try requireRenameAlertField(app)
         let original = try XCTUnwrap(field.value as? String)
         XCTAssertEqual(original, seedTitle)
         let renamed = "Documento REA renomeado"
         try tap(field, app: app)
+        try dismissKeyboardIntroductionIfPresent(app)
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: original.count))
         field.typeText(renamed)
         XCTAssertEqual(field.value as? String, renamed)
@@ -149,11 +150,76 @@ final class LaunchTests: XCTestCase {
         _ = try require("document.screen", app: app)
         try assertTwoPages(app)
         try tap("document.rename", app: app)
-        let reopened = try require("document.renameField", app: app)
+        let reopened = try requireRenameAlertField(app)
         XCTAssertEqual(reopened.value as? String, renamed)
         capture("document-renamed-reopened", app: app)
         XCTAssertEqual(app.alerts.firstMatch.buttons.count, 2)
         try tap(app.alerts.firstMatch.buttons.element(boundBy: 0), app: app)
+    }
+
+    @MainActor
+    private func dismissKeyboardIntroductionIfPresent(_ app: XCUIApplication) throws {
+        // Actual simulator AX from run 38683538487: the first-run keyboard
+        // tutorial owns this container, its explanatory text, and Continue.
+        // This is system setup, not a product action or an app-wide Continue tap.
+        let introductions = app.otherElements.matching(identifier: "UIContinuousPathIntroductionView")
+        let introduction = introductions.firstMatch
+        guard introduction.waitForExistence(timeout: 2) else { return }
+
+        let explanation = introduction.staticTexts[
+            "Speed up your typing by sliding your finger across the letters to compose a word."]
+        let continueButtons = introduction.buttons.matching(NSPredicate(format: "label == %@", "Continue"))
+        let continueButton = continueButtons.firstMatch
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            introductions.count == 1 && explanation.exists && continueButtons.count == 1 &&
+                continueButton.exists && continueButton.isEnabled && continueButton.isHittable
+        }, object: nil)
+        guard XCTWaiter.wait(for: [ready], timeout: 5) == .completed else {
+            capture("failure-keyboard-introduction-guard", app: app)
+            XCTFail("Keyboard introduction appeared without the exact observed message and unique usable Continue button.")
+            throw FlowFailure.transition("keyboard introduction guard")
+        }
+
+        capture("system-keyboard-introduction-before-dismissal", app: app)
+        continueButton.tap() // One bounded attempt, confined to the verified system container.
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
+                                                  object: introduction)
+        guard XCTWaiter.wait(for: [dismissed], timeout: 5) == .completed else {
+            capture("failure-keyboard-introduction-not-dismissed", app: app)
+            XCTFail("The keyboard introduction remained after its single Continue tap.")
+            throw FlowFailure.transition("keyboard introduction dismissal")
+        }
+        capture("system-keyboard-introduction-dismissed", app: app)
+    }
+
+    @MainActor
+    private func requireRenameAlertField(_ app: XCUIApplication) throws -> XCUIElement {
+        // CI run 38683538487 exposed one native alert TextField with placeholder
+        // Nome and the document value, but dropped its SwiftUI identifier.
+        // Scope to the alert and reject ambiguity instead of selecting an app-wide field.
+        let alert = app.alerts.firstMatch
+        guard alert.waitForExistence(timeout: timeout) else {
+            capture("failure-rename-alert-missing", app: app)
+            XCTFail("Tapping document.rename must open the native rename alert.")
+            throw FlowFailure.missingElement("rename alert")
+        }
+        guard app.alerts.count == 1 else {
+            capture("failure-rename-alert-ambiguous", app: app)
+            XCTFail("Expected exactly one native alert while renaming.")
+            throw FlowFailure.transition("ambiguous rename alert")
+        }
+        let field = alert.textFields.firstMatch
+        guard field.waitForExistence(timeout: timeout) else {
+            capture("failure-rename-alert-field-missing", app: app)
+            XCTFail("The native rename alert must expose its text field.")
+            throw FlowFailure.missingElement("rename alert text field")
+        }
+        guard alert.textFields.count == 1 else {
+            capture("failure-rename-alert-field-ambiguous", app: app)
+            XCTFail("Expected exactly one text field in the rename alert.")
+            throw FlowFailure.transition("ambiguous rename alert text field")
+        }
+        return field
     }
 
     @MainActor
@@ -198,10 +264,40 @@ final class LaunchTests: XCTestCase {
     }
 
     @MainActor
-    private func openFirstPage(_ app: XCUIApplication) throws {
+    private func openFirstPage(_ app: XCUIApplication, expectingInitialCrop: Bool = true) throws {
         try tap(app.buttons.matching(identifier: "document.page").firstMatch, app: app)
         _ = try require("editor.screen", app: app)
         capture("editor-opened", app: app)
+
+        let process = element("editor.process", app: app)
+        let save = element("editor.save", app: app)
+        let adjustments = element("editor.adjustments", app: app)
+        if !expectingInitialCrop {
+            // Reopening persisted metadata may restore processed mode or start
+            // in crop again. Require a real entry state, never an arbitrary delay.
+            let entry = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                process.exists || (save.exists && adjustments.exists)
+            }, object: nil)
+            guard XCTWaiter.wait(for: [entry], timeout: timeout) == .completed else {
+                capture("failure-editor-entry-state", app: app)
+                XCTFail("Reopened editor exposed neither crop nor processed controls.")
+                throw FlowFailure.transition("editor entry state")
+            }
+        }
+        if expectingInitialCrop || process.exists {
+            let advance = try require("editor.process", app: app)
+            _ = try require("editor.detect-borders", app: app)
+            _ = try require("editor.rotate-left", app: app)
+            _ = try require("editor.rotate-right", app: app)
+            XCTAssertFalse(save.exists, "Save belongs to processed mode, not the initial crop toolbar.")
+            XCTAssertFalse(adjustments.exists, "Adjustments require completing the crop step first.")
+            capture("editor-crop-before-process", app: app)
+            try tap(advance, app: app)
+            try requireDisappearance(advance, app: app)
+        }
+        _ = try require("editor.save", app: app)
+        _ = try require("editor.adjustments", app: app)
+        capture("editor-processed-after-crop", app: app)
     }
 
     @MainActor
