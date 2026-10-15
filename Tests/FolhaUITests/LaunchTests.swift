@@ -131,7 +131,11 @@ final class LaunchTests: XCTestCase {
         let renamed = "Documento REA renomeado"
         try tap(field, app: app)
         try dismissKeyboardIntroductionIfPresent(app)
-        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: original.count))
+        // This synthetic Latin title occupies one line. A center tap can put
+        // the caret before REA; explicitly move to the trailing interior first.
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: original.count + 1))
+        XCTAssertEqual(field.value as? String, "", "The complete original title must be removed before renaming.")
         field.typeText(renamed)
         XCTAssertEqual(field.value as? String, renamed)
         let alert = app.alerts.firstMatch
@@ -166,18 +170,35 @@ final class LaunchTests: XCTestCase {
         let introduction = introductions.firstMatch
         guard introduction.waitForExistence(timeout: 2) else { return }
 
-        let explanation = introduction.staticTexts[
-            "Speed up your typing by sliding your finger across the letters to compose a word."]
         let continueButtons = introduction.buttons.matching(NSPredicate(format: "label == %@", "Continue"))
         let continueButton = continueButtons.firstMatch
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            introductions.count == 1 && explanation.exists && continueButtons.count == 1 &&
-                continueButton.exists && continueButton.isEnabled && continueButton.isHittable
+            // One immutable AX snapshot avoids spending a short timeout on a
+            // series of remote count/value queries. Do not match a whole paragraph.
+            guard let snapshot = try? introduction.snapshot() else { return false }
+            let descendants = self.snapshotTree(snapshot)
+            let buttons = descendants.filter { $0.elementType == .button && $0.label == "Continue" }
+            let hasKeyboardHint = descendants.contains {
+                let label = $0.label.lowercased()
+                return $0.elementType == .staticText && label.contains("typing") && label.contains("sliding")
+            }
+            return snapshot.identifier == "UIContinuousPathIntroductionView" && hasKeyboardHint &&
+                buttons.count == 1 && buttons[0].isEnabled
         }, object: nil)
-        guard XCTWaiter.wait(for: [ready], timeout: 5) == .completed else {
+        guard XCTWaiter.wait(for: [ready], timeout: 10) == .completed else {
             capture("failure-keyboard-introduction-guard", app: app)
-            XCTFail("Keyboard introduction appeared without the exact observed message and unique usable Continue button.")
+            record("keyboard-introduction-AX", text: app.debugDescription)
+            XCTFail("Keyboard introduction must contain its typing/sliding hint and exactly one enabled Continue button.")
             throw FlowFailure.transition("keyboard introduction guard")
+        }
+
+        let tappable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"),
+                                                 object: continueButton)
+        guard XCTWaiter.wait(for: [tappable], timeout: 10) == .completed else {
+            capture("failure-keyboard-continue-not-hittable", app: app)
+            record("keyboard-continue-AX", text: app.debugDescription)
+            XCTFail("The identified keyboard introduction Continue button did not become hittable.")
+            throw FlowFailure.transition("keyboard Continue readiness")
         }
 
         capture("system-keyboard-introduction-before-dismissal", app: app)
@@ -190,6 +211,10 @@ final class LaunchTests: XCTestCase {
             throw FlowFailure.transition("keyboard introduction dismissal")
         }
         capture("system-keyboard-introduction-dismissed", app: app)
+    }
+
+    private func snapshotTree(_ snapshot: XCUIElementSnapshot) -> [XCUIElementSnapshot] {
+        [snapshot] + snapshot.children.flatMap { snapshotTree($0) }
     }
 
     @MainActor
@@ -265,7 +290,7 @@ final class LaunchTests: XCTestCase {
 
     @MainActor
     private func openFirstPage(_ app: XCUIApplication, expectingInitialCrop: Bool = true) throws {
-        try tap(app.buttons.matching(identifier: "document.page").firstMatch, app: app)
+        try tapFirstDocumentPage(app)
         _ = try require("editor.screen", app: app)
         capture("editor-opened", app: app)
 
@@ -302,12 +327,84 @@ final class LaunchTests: XCTestCase {
 
     @MainActor
     private func returnToDocument(_ app: XCUIApplication) throws {
-        if element("editor.screen", app: app).exists {
-            try navigateBack(to: "document.screen", app: app)
-        } else {
-            _ = try require("document.screen", app: app)
+        let editor = element("editor.screen", app: app)
+        if editor.exists {
+            // Leave via the editor's explicit cancellation action. A processed
+            // crop may be dirty even after the adjustment draft was cancelled.
+            try tap("editor.cancel", app: app)
+            let discardInAlert = app.alerts.buttons.matching(
+                NSPredicate(format: "label == %@", "Descartar e sair")).firstMatch
+            let discardInSheet = app.sheets.buttons.matching(
+                NSPredicate(format: "label == %@", "Descartar e sair")).firstMatch
+            let exitOrConfirmation = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                !editor.exists || discardInAlert.exists || discardInSheet.exists
+            }, object: nil)
+            guard XCTWaiter.wait(for: [exitOrConfirmation], timeout: timeout) == .completed else {
+                capture("failure-editor-cancel-transition", app: app)
+                record("editor-cancel-AX", text: app.debugDescription)
+                XCTFail("Editor cancellation neither dismissed the editor nor presented its discard confirmation.")
+                throw FlowFailure.transition("editor.cancel")
+            }
+            // This destructive confirmation is confined to the synthetic
+            // document and to a modal reached by the explicit cancel action.
+            if discardInAlert.exists {
+                capture("editor-discard-confirmation", app: app)
+                try tap(discardInAlert, app: app)
+            } else if discardInSheet.exists {
+                capture("editor-discard-confirmation", app: app)
+                try tap(discardInSheet, app: app)
+            }
         }
+        try requireDisappearance(editor, app: app)
+        _ = try require("document.screen", app: app)
+        XCTAssertFalse(app.alerts.firstMatch.exists, "No modal may cover the document after editor exit.")
+        XCTAssertFalse(app.sheets.firstMatch.exists, "The discard sheet must be dismissed before reopening a page.")
         try assertTwoPages(app)
+    }
+
+    @MainActor
+    private func tapFirstDocumentPage(_ app: XCUIApplication) throws {
+        // The observed native List is a CollectionView identified as
+        // document.screen. Scope to that list instead of searching all app buttons.
+        // Run 38685680588 stalled while resolving the FIRST page query, before
+        // any editor action. Reacquire once after a read-only readiness timeout;
+        // never retry a tap or dismiss an unrelated alert to make the test pass.
+        for attempt in 1...2 {
+            let list = app.collectionViews.matching(identifier: "document.screen").firstMatch
+            let page = list.buttons.matching(identifier: "document.page").firstMatch
+            let ready = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"),
+                object: page)
+            if XCTWaiter.wait(for: [ready], timeout: timeout) == .completed {
+                page.tap()
+                return
+            }
+            capture("document-page-readiness-attempt-\(attempt)", app: app)
+            record("document-page-readiness-AX-\(attempt)", text: app.debugDescription)
+            guard element("document.screen", app: app).exists,
+                  !element("editor.screen", app: app).exists,
+                  !app.alerts.firstMatch.exists, !app.sheets.firstMatch.exists else { break }
+
+            // Authorized fallback for a visible, enabled row whose AX readiness
+            // timed out. Derive coordinates from a fresh snapshot, never a
+            // hard-coded screenshot location, and issue at most one real tap.
+            if let snapshot = try? page.snapshot(), snapshot.elementType == .button,
+               snapshot.identifier == "document.page", snapshot.isEnabled {
+                let frame = snapshot.frame
+                let bounds = app.frame
+                if !frame.isEmpty && !frame.isNull && !frame.isInfinite && bounds.contains(frame) {
+                    record("document-page-coordinate-fallback",
+                           text: "AX readiness timed out; enabled document.page frame=\(frame), app=\(bounds). One center tap; editor transition is required.")
+                    app.coordinate(withNormalizedOffset: .zero)
+                        .withOffset(CGVector(dx: frame.midX - bounds.minX, dy: frame.midY - bounds.minY)).tap()
+                    _ = try require("editor.screen", app: app)
+                    return
+                }
+            }
+            guard attempt == 1 else { break }
+        }
+        XCTFail("The first document.page did not become enabled and hittable after bounded query reacquisition.")
+        throw FlowFailure.transition("document.page readiness")
     }
 
     @MainActor
@@ -395,18 +492,12 @@ final class LaunchTests: XCTestCase {
 
     @MainActor
     private func waitForSaveToSettle(_ app: XCUIApplication) throws {
-        let editor = element("editor.screen", app: app)
-        let document = element("document.screen", app: app)
-        let save = element("editor.save", app: app)
-        let finished = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            (!editor.exists && document.exists) || (save.exists && save.isEnabled && save.isHittable)
-        }, object: nil)
-        guard XCTWaiter.wait(for: [finished], timeout: timeout) == .completed else {
-            capture("failure-save-timeout", app: app)
-            XCTFail("The editor did not finish saving within \(timeout) seconds.")
-            throw FlowFailure.transition("editor.save")
-        }
+        // Saving intentionally dismisses the editor. Never read enabled/hittable
+        // from editor.save after the tap: it can disappear between AX requests.
+        try requireDisappearance(element("editor.screen", app: app), app: app)
+        _ = try require("document.screen", app: app)
         XCTAssertFalse(app.alerts.firstMatch.exists, "Saving must not leave an error alert.")
+        try assertTwoPages(app)
     }
 
     @MainActor
