@@ -3,7 +3,7 @@ import Foundation
 
 let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-for size in [29, 40, 57, 58, 60, 76, 80, 87, 114, 120, 152, 167, 180, 1024] {
+for size in [20, 29, 40, 57, 58, 60, 76, 80, 87, 114, 120, 152, 167, 180, 1024] {
     let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: size * 4, bitsPerPixel: 32)!
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)

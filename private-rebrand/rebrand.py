@@ -115,7 +115,22 @@ for path in app.glob("*.png"):
     old = path.read_bytes()
     if old[:8] != b"\x89PNG\r\n\x1a\n":
         raise ValueError("Unexpected icon format")
-    width, height = struct.unpack(">II", old[16:24])
+    offset = 8
+    dimensions = None
+    while offset + 12 <= len(old):
+        length = struct.unpack(">I", old[offset:offset + 4])[0]
+        kind = old[offset + 4:offset + 8]
+        if offset + 12 + length > len(old):
+            raise ValueError("Truncated PNG chunk")
+        if kind == b"IHDR":
+            if length != 13:
+                raise ValueError("Invalid PNG IHDR length")
+            dimensions = struct.unpack(">II", old[offset + 8:offset + 16])
+            break
+        offset += length + 12
+    if dimensions is None:
+        raise ValueError("PNG IHDR not found")
+    width, height = dimensions
     if width != height:
         raise ValueError("Unexpected non-square app icon")
     brand = ROOT / "brand" / (str(width) + ".png")
