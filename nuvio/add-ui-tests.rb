@@ -10,6 +10,8 @@ raise 'Original iOS target missing' unless app
 raise 'Regression target already exists' if project.targets.any? { |t| t.name == 'NuvioRegressionUITests' }
 tests = project.new_target(:ui_test_bundle, 'NuvioRegressionUITests', :ios, '16.1')
 tests.add_dependency(app)
+project.root_object.attributes['TargetAttributes'] ||= {}
+project.root_object.attributes['TargetAttributes'][tests.uuid] = { 'TestTargetID' => app.uuid }
 tests.build_configurations.each do |config|
   config.build_settings['PRODUCT_NAME'] = 'NuvioRegressionUITests'
   config.build_settings['PRODUCT_MODULE_NAME'] = 'NuvioRegressionUITests'

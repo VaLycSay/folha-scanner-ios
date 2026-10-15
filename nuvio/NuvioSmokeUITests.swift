@@ -5,7 +5,7 @@ final class NuvioSmokeUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
-        app = XCUIApplication(bundleIdentifier: "com.nuvio.media")
+        app = XCUIApplication()
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         XCUIDevice.shared.orientation = .portrait
         app.launch()
