@@ -1,0 +1,68 @@
+name: VIA Apple place search probe
+on:
+  push:
+    branches: ['via-ios-*']
+    paths: ['.github/workflows/via-place-probe.yml']
+permissions:
+  contents: read
+jobs:
+  search:
+    runs-on: macos-26
+    timeout-minutes: 5
+    steps:
+      - name: Probe public named places with explicit POI search
+        run: |
+          mkdir -p reports
+          cat > search.swift <<'SWIFT'
+          // Read-only public-place search smoke test. No customer routes or documents.
+          import Foundation
+          import MapKit
+          
+          let queries = ["Universidade Federal de Goias Goiania", "Colegio Militar Hugo de Carvalho Ramos Goiania", "Colegio Estadual Lyceu de Goiania"]
+          var reports = [[String: Any]]()
+          var index = 0
+          var active: MKLocalSearch?
+          var generation = 0
+          func finish() {
+              let result: [String: Any] = ["provider": "Apple Maps MKLocalSearch", "platform": "macOS runner", "physical_iphone": false, "automatic_location_acceptance": false, "results": reports]
+              if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]) {
+                  try? data.write(to: URL(fileURLWithPath: "reports/apple-search-live.json"))
+                  print(String(data: data, encoding: .utf8)!)
+              }
+              exit(0)
+          }
+          func next() {
+              guard index < queries.count else { finish(); return }
+              let query = queries[index]; index += 1; generation += 1
+              let current = generation
+              let request = MKLocalSearch.Request()
+              request.naturalLanguageQuery = query
+              request.resultTypes = [.pointOfInterest, .address]
+              request.region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: -16.68, longitude: -49.26), latitudinalMeters: 70000, longitudinalMeters: 70000)
+              let search = MKLocalSearch(request: request); active = search
+              search.start { response, error in
+                  guard generation == current else { return }
+                  generation += 1
+                  let points: [[String: Any]] = response?.mapItems.prefix(5).map { item in
+                      ["name": item.name ?? "", "address": item.placemark.title ?? "", "lat": item.placemark.coordinate.latitude, "lon": item.placemark.coordinate.longitude]
+                  } ?? []
+                  reports.append(["query": query, "candidates": points, "error": error?.localizedDescription ?? "", "status": points.isEmpty ? "no_candidates_or_service_error" : "candidates_returned_not_human_confirmed"])
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { next() }
+              }
+              DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                  guard generation == current else { return }
+                  generation += 1; search.cancel()
+                  reports.append(["query": query, "status": "timeout", "candidates": []])
+                  next()
+              }
+          }
+          next()
+          RunLoop.main.run()
+          SWIFT
+          swift search.swift
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VIA-Apple-search
+          path: reports/apple-search-live.json
+          if-no-files-found: error
+          retention-days: 7
