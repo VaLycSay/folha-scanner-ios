@@ -28,8 +28,20 @@ jobs:
           PY
       - name: Obtain Xcode project generator
         run: if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+      - name: Live search before native UI tests
+        run: VIA_PROBE_ONLY=1 bash via-build/ios/build.sh
+      - name: Live search diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VIA-live-search
+          path: |
+            via-build/ios/reports/*live*
+            via-build/ios/reports/*probe-build*
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Test on iPhone simulator and build device IPA
-        run: bash via-build/ios/build.sh
+        run: VIA_SKIP_SEARCH_PROBES=1 bash via-build/ios/build.sh
       - name: IPA and integrity receipt
         uses: actions/upload-artifact@v4
         with:
