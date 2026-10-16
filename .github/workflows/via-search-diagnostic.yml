@@ -1,0 +1,61 @@
+name: VIA focused public school search diagnosis
+on:
+  push:
+    branches: ['via-ios-20261015']
+    paths: ['.github/workflows/via-search-diagnostic.yml']
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: macos-26
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack existing own search sources
+        run: |
+          python3 - <<'PY'
+          import base64,io,pathlib,zipfile
+          with zipfile.ZipFile(io.BytesIO(base64.b64decode(pathlib.Path('via-ios/build-source.b64').read_text(),validate=True))) as z:
+              for name in z.namelist():
+                  p=pathlib.PurePosixPath(name)
+                  if p.is_absolute() or '..' in p.parts or not name.startswith('ios/'):
+                      raise SystemExit('Invalid path')
+              z.extractall('via-diagnostic')
+          PY
+      - name: Public place queries, no private route or credentials
+        run: |
+          cd via-diagnostic/ios
+          cat > diagnostic.swift <<'SWIFT'
+          import Foundation
+          import MapKit
+          @main struct Probe {
+           static func main() {
+            Task { @MainActor in
+             let provider=ApplePlaceSearch(requestTimeout:5)
+             let queries=["Cepmg Naly Deusdara","Naly Deusdara","Naly Deusdara Goiania","Colegio da Policia Militar de Goias Naly Deusdara","Espaco de Educacao e Convivencia Juvenil Naly Deusdara","Rua C5 Parque das Laranjeiras Goiania","Colegio Estadual Villa Lobos Aparecida de Goiania","Villa Lobos Garavelo"]
+             for q in queries {
+              var r:[String:Any]=["query":q,"live":true]
+              do {
+               let raw=try await provider.search(query:q,near:.goiania)
+               r["raw"]=raw
+               r["filtered_for_naly"]=PlaceSuggestionRules.ranked(raw,query:"Cepmg Naly Deusdara",near:.goiania)
+               r["status"]=raw.isEmpty ? "empty":"success"
+              } catch {r["status"]="error";r["error"]=NativeError.wrapping(error).message}
+              let data=try! JSONSerialization.data(withJSONObject:r,options:[.sortedKeys])
+              print(String(data:data,encoding:.utf8)!)
+             }
+             exit(0)
+            }
+            RunLoop.main.run()
+           }
+          }
+          SWIFT
+          swiftc -swift-version 5 Sources/NativeError.swift Sources/ApplePlaceSearch.swift Sources/PlaceSuggestionRules.swift diagnostic.swift -o diagnostic
+          ./diagnostic | tee search-diagnostic.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: VIA-school-search-diagnostic
+          path: via-diagnostic/ios/search-diagnostic.jsonl
+          retention-days: 7
+          if-no-files-found: error
