@@ -1,0 +1,54 @@
+name: VIA iOS - local engine and device IPA
+on:
+  push:
+    branches: ['via-ios-*']
+    paths: ['via-ios/build-source.b64', '.github/workflows/via-ios.yml']
+permissions:
+  contents: read
+concurrency:
+  group: via-ios-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack own application source only
+        run: |
+          python3 - <<'PY'
+          import base64, io, pathlib, zipfile
+          source=pathlib.Path('via-ios/build-source.b64').read_text()
+          with zipfile.ZipFile(io.BytesIO(base64.b64decode(source,validate=True))) as z:
+              for name in z.namelist():
+                  p=pathlib.PurePosixPath(name)
+                  if p.is_absolute() or '..' in p.parts or not name.startswith('ios/'):
+                      raise SystemExit('Invalid build path')
+              z.extractall('via-build')
+          PY
+      - name: Obtain Xcode project generator
+        run: if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+      - name: Test on iPhone simulator and build device IPA
+        run: bash via-build/ios/build.sh
+      - name: IPA and integrity receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: VIA-Rotas-iPhone-0.2.0
+          path: |
+            via-build/ios/artifacts/*.ipa
+            via-build/ios/artifacts/*.json
+            via-build/ios/artifacts/*.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VIA-iOS-tests
+          path: |
+            via-build/ios/reports/*.log
+            via-build/ios/reports/*.json
+            via-build/ios/reports/*.txt
+            via-build/ios/reports/*.png
+          if-no-files-found: ignore
+          retention-days: 7
