@@ -2,7 +2,7 @@ name: VIA iOS - local engine and device IPA
 on:
   push:
     branches: ['via-ios-*']
-    paths: ['via-ios/build-source.b64', '.github/workflows/via-ios.yml']
+    paths: ['via-ios/build-source.b64']
 permissions:
   contents: read
 concurrency:
@@ -50,5 +50,6 @@ jobs:
             via-build/ios/reports/*.json
             via-build/ios/reports/*.txt
             via-build/ios/reports/*.png
+            via-build/ios/reports/attachments/**
           if-no-files-found: ignore
           retention-days: 7
